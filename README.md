@@ -80,7 +80,7 @@ Claude Code keeps its configuration in `~/.claude`, or in `$CLAUDE_CONFIG_DIR` w
 
 \* A new profile's `.claude.json` starts as a copy of yours with the account, IDs and caches removed, so you skip onboarding and keep your project trust and MCP servers. MCP server definitions are copied as they are, including any tokens written into them. Servers that sign in with OAuth need signing in once per profile. After that the files are separate; `claude-as sync acme` copies over servers and project settings you add later.
 
-† Not shared by default because of a Claude Code bug; see [why](#why-arent-transcripts-and-memory-shared). Use `claude-as import` to carry a session between accounts.
+† Not shared by default because of a Claude Code bug, which `claude-as` works around if you opt in; see [why](#why-arent-transcripts-and-memory-shared). Otherwise, `claude-as import` carries a session between accounts.
 
 The `default` profile is plain `~/.claude`. `claude-as` runs it with `CLAUDE_CONFIG_DIR` **unset**, exactly like plain `claude`, so a value inherited from another profile's shell can't leak in. (Pointing `CLAUDE_CONFIG_DIR` at `~/.claude` explicitly does not work: Claude Code then looks for `~/.claude/.claude.json` and a different Keychain entry, and your normal account appears logged out.)
 
@@ -99,7 +99,8 @@ Some credentials take precedence over any profile's login ([docs](https://code.c
 | `claude-as env <profile>` | Print shell exports: `eval "$(claude-as env acme)"` |
 | `claude-as import <profile> <session-id>` | Copy a session, with its subagent transcripts, from whichever profile has it, so `<profile>` can `--resume` it |
 | `claude-as sync <profile>` | Copy MCP servers and project settings the profile lacks from the default profile. The profile's own values win |
-| `claude-as doctor [profile] [--fix]` | Check every shared link, and warn about credentials that override profile logins. `--fix` re-creates links, and merges a profile's own copies of shared items into `~/.claude` (see below) |
+| `claude-as doctor [profile] [--fix]` | Check every shared link and plugin path, and warn about credentials that override profile logins. `--fix` re-creates links, merges a profile's own copies of shared items into `~/.claude` (see below), and rewrites plugin paths recorded under a profile |
+| `claude-as hook permission-request` | Run by Claude Code, not by you: the permission hook described in the [FAQ](#why-arent-transcripts-and-memory-shared) |
 
 Profile names use lowercase letters, digits, `-` and `_`. The names of `claude-as` and `claude` subcommands (`list`, `auth`, `mcp`, ...) are reserved, so `claude-as auth login` points out the missing profile name instead of creating a profile called `auth`.
 
@@ -149,7 +150,7 @@ Several tools tackle this; pick the one that fits.
 - **Keychain switchers** such as [CCSwitcher](https://github.com/XueshiQiao/CCSwitcher) and [cc-account-switcher](https://github.com/ming86/cc-account-switcher) (archived) swap the stored login, so one account is active at a time.
 - **[claude-swap](https://github.com/realiti4/claude-swap)** (Python) is a full-featured switcher with a usage dashboard and automatic switching. Its session mode runs accounts concurrently on your normal `~/.claude` setup.
 - **[cpm](https://github.com/JakubKontra/claude-profile-manager)** (Go) is a featureful profile manager: per-project auto-switching, per-profile overrides, cloud sync. It symlinks commands, skills, plugins and projects, and gives each profile its own copy of `settings.json`.
-- **claude-as** is the small one. Like cpm and claude-swap's session mode, it shares your setup through symlinks. Unlike them, it is a single script with nothing to configure, links `settings.json` and `CLAUDE.md` instead of copying them, keeps transcripts per profile to avoid the upstream bug below, and never stores login tokens.
+- **claude-as** is the small one. Like cpm and claude-swap's session mode, it shares your setup through symlinks. Unlike them, it is a single script with nothing to configure, links `settings.json` and `CLAUDE.md` instead of copying them, keeps transcripts per profile by default (and works around the upstream bug below if you share them), and never stores login tokens.
 
 ## Responsible use
 
@@ -161,8 +162,12 @@ Several tools tackle this; pick the one that fits.
 Yes. Run `claude-as import acme <session-id>`, then `claude-as acme --resume <session-id>` from the same folder. The session ID is the name of the session's `.jsonl` file under `~/.claude/projects/`. The import is a copy, so the original stays where it was. Prompt caching is per account, so the first turn after switching sends the whole conversation again.
 
 <a id="why-arent-transcripts-and-memory-shared"></a>
-**Why aren't transcripts and memory shared?**
-Sharing them needs `projects/` to be a symlink. Since Claude Code 2.1.280, that triggers an upstream permission bug ([anthropics/claude-code#98044](https://github.com/anthropics/claude-code/issues/98044), [#112052](https://github.com/anthropics/claude-code/issues/112052)). Every auto-memory write, every read-back of a large saved tool output, and every plan file in `plans/` is treated as a sensitive write outside the config directory. Each one prompts with no "always allow", and headless `claude -p` runs get them denied. If you mostly work interactively and want shared memory anyway, add `share_add = projects plans` and run `claude-as doctor --fix`.
+**Why aren't transcripts and memory shared by default?**
+Sharing them makes `projects/` a symlink, which runs into an upstream permission bug ([anthropics/claude-code#98044](https://github.com/anthropics/claude-code/issues/98044), [#112052](https://github.com/anthropics/claude-code/issues/112052); still present in Claude Code 2.1.332). Claude Code treats three things as sensitive writes outside the config directory: the session's own auto-memory writes, its reads of saved tool output, and plan-mode plan files. Each one prompts with no "always allow", and headless `claude -p` runs get them denied.
+
+To share them anyway, add `share_add = projects plans` and run `claude-as doctor --fix`. `claude-as` then starts those profiles with a small permission hook (`claude-as hook permission-request`). It approves exactly those three things, which Claude Code allows by itself when there is no symlink, and only after checking that the real path lands inside `~/.claude`. Anything else still gets the normal prompt.
+
+The hook is passed with `--settings` at launch, so your `settings.json` is untouched. It is skipped when you pass your own `--settings`, or when `CLAUDE_AS_NO_HOOK=1` is set. Sharing is opt-in because it relies on Claude Code's hook behaviour, which was checked with 2.1.332.
 
 **Can several accounts run at once without clobbering each other?**
 Yes, that is the point. Running-session state is per profile. The shared files are the same ones Claude Code already shares between concurrent sessions of a single account.
@@ -174,7 +179,7 @@ Yes, that is the point. Running-session state is per profile. The shared files a
 Claude Code 2.1.332 writes `settings.json` through the link. If a shared item ever does turn into a real file, each launch warns about it, and `claude-as doctor --fix` merges it back as described above.
 
 **How do I remove a profile?**
-Run `claude-as acme auth logout`, then `rm -rf ~/.claude-acme`, plus `rm ~/.local/bin/claude-acme` if you linked it. The shared setup lives in `~/.claude` and is not affected.
+First run `claude-as doctor --fix`, so plugins you installed from that profile no longer record their paths under it. Then run `claude-as acme auth logout` and `rm -rf ~/.claude-acme`, plus `rm ~/.local/bin/claude-acme` if you linked it. The shared setup lives in `~/.claude` and is not affected.
 
 **API keys, Bedrock or Vertex?**
 `claude-as` only chooses the config directory, so each profile uses whatever authentication it is set up with. One exception, per [Anthropic's docs](https://code.claude.com/docs/en/authentication): a Claude Console sign-in without an API key is kept outside the config directory, so profiles can't keep two of those apart.
@@ -187,11 +192,12 @@ Not natively. It may work inside WSL, but that is untested.
 
 ## Known upstream issues
 
-These Claude Code bugs affect any setup with more than one config directory:
+These Claude Code issues affect setups with more than one config directory. Their status was last checked against Claude Code 2.1.332:
 
-- Writes through a symlinked `projects/` or `plans/` prompt ([anthropics/claude-code#98044](https://github.com/anthropics/claude-code/issues/98044), [#112052](https://github.com/anthropics/claude-code/issues/112052)). This is why they aren't shared by default.
-- A few files are still written to `~/.claude` whatever the config directory is, for example `~/.claude/ssh` ([#111548](https://github.com/anthropics/claude-code/issues/111548)) and scheduled tasks ([#100138](https://github.com/anthropics/claude-code/issues/100138)).
-- Plugins record their install path under the profile that installed them. If you delete that profile, reinstall the plugin from another one. Updating a git marketplace may only work from the profile that added it ([#82272](https://github.com/anthropics/claude-code/issues/82272), closed as not planned).
+- **Symlinked `projects/` or `plans/` prompt** ([anthropics/claude-code#98044](https://github.com/anthropics/claude-code/issues/98044), [#112052](https://github.com/anthropics/claude-code/issues/112052); open). This is why they aren't shared by default. If you opt in, `claude-as` works around it, as described in the [FAQ](#why-arent-transcripts-and-memory-shared).
+- **Plugins record their install path under the profile that installed them**, although the files live in the shared `plugins/`. `claude-as doctor --fix` rewrites those paths to `~/.claude`, so deleting a profile can't orphan its plugins.
+- **A few things still go to `~/.claude` whatever the config directory is**: `~/.claude/ssh` ([#111548](https://github.com/anthropics/claude-code/issues/111548), on Linux) and scheduled-task definitions ([#100138](https://github.com/anthropics/claude-code/issues/100138)). With `claude-as`, `~/.claude` is the shared base, so this is harmless.
+- **Updating a marketplace from a profile other than the one that added it** used to fail ([#82272](https://github.com/anthropics/claude-code/issues/82272)). It no longer does in 2.1.332.
 
 ## Development
 

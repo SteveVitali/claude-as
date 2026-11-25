@@ -4,6 +4,30 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-11-25
+
+### Added
+- Sharing `projects/` (transcripts and auto-memory) and `plans/` now works
+  without permission prompts. Profiles that share them (`share_add = projects
+  plans`) launch with a narrowly scoped PermissionRequest hook,
+  `claude-as hook permission-request`, which works around
+  anthropics/claude-code#98044 and anthropics/claude-code#112052 (still open in
+  Claude Code 2.1.332). It approves only what Claude Code itself allows when
+  there is no symlink: the session's own auto-memory writes, its reads of its
+  own saved tool output, and the plan file in plan mode, and only after
+  checking that the real path lands in the shared base. Anything else gets the
+  normal prompt. The hook is passed with `--settings`, so `settings.json` is not
+  modified; it is skipped when you pass your own `--settings` or set
+  `CLAUDE_AS_NO_HOOK=1`.
+- `doctor` finds plugin install paths recorded under a profile; `--fix`
+  rewrites them to the base (the same files), so deleting a profile can't
+  orphan its plugins.
+
+### Changed
+- README "Known upstream issues" brought up to date: anthropics/claude-code#82272
+  no longer reproduces in 2.1.332, and #111548 and #100138 are harmless with
+  claude-as.
+
 ## [0.2.0] - 2026-11-25
 
 ### Fixed
@@ -76,5 +100,6 @@ All notable changes to this project are documented here. The format follows
   `claude_bin`, `base_dir`.
 - Works with macOS's bash 3.2 as well as current bash.
 
+[0.3.0]: https://github.com/SteveVitali/claude-as/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/SteveVitali/claude-as/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/SteveVitali/claude-as/releases/tag/v0.1.0

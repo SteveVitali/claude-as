@@ -12,6 +12,10 @@ Issues and pull requests are welcome.
 - Anything that moves or deletes files must first check `overlaps` (the two
   sides must not be the same place) and must report a failed step instead of
   carrying on.
+- The permission hook (`hook_allows`) must never approve more than Claude Code
+  allows by itself without a symlink, and every case it refuses needs a test.
+  The tests are checked against a copy of the script whose hook approves
+  everything, and every refusal test must fail against that copy.
 - Keep the launch path (`claude-as <profile>`) free of subshells and external
   commands once a profile exists; it runs before every Claude Code start.
 - Add a bats test for every behaviour change. Tests run in a throwaway `HOME`

@@ -666,3 +666,153 @@ make_session() { # <config-dir> <slug> <sid>
   [ -e "$TESTTMP/linkbin/claude-work" ]
 }
 
+
+# --- the permission hook for shared projects/ and plans/ (claude-code#98044) ---------
+
+# hook <tool> <file> [transcript] [session] [cwd] [mode] — run the hook as Claude Code would.
+hook() {
+  local json
+  json="$(jq -n --arg t "$1" --arg f "$2" --arg tp "${3:-}" --arg s "${4:-}" --arg c "${5:-/nowhere}" --arg m "${6:-default}" \
+    '{hook_event_name: "PermissionRequest", tool_name: $t, tool_input: {file_path: $f}, transcript_path: $tp, session_id: $s, cwd: $c, permission_mode: $m}')"
+  printf '%s' "$json" | CLAUDE_CONFIG_DIR="$HOME/.claude-work" "$TEST_BASH" "$SCRIPT" hook permission-request
+}
+
+shared_work() {
+  write_config "share_add = projects plans"
+  ca setup work >/dev/null 2>&1
+  W="$HOME/.claude-work"; SID=aaaa1111-2222; SLUG=-repo-a
+  mkdir -p "$HOME/.claude/projects/$SLUG"
+  TP="$W/projects/$SLUG/$SID.jsonl"; : > "$HOME/.claude/projects/$SLUG/$SID.jsonl"
+}
+
+ALLOW='"behavior":"allow"'
+
+@test "hook: allows the session's own auto-memory write through shared projects/" {
+  shared_work
+  run hook Write "$W/projects/$SLUG/memory/note.md" "$TP" "$SID"
+  [ "$status" -eq 0 ]; [[ "$output" == *"$ALLOW"* ]] || false
+  run hook Edit "$W/projects/$SLUG/memory/MEMORY.md" "$TP" "$SID"
+  [[ "$output" == *"$ALLOW"* ]] || false
+}
+
+@test "hook: no answer for another project's memory, non-.md files, or traversal" {
+  shared_work
+  run hook Write "$W/projects/-other/memory/note.md" "$TP" "$SID";            [ -z "$output" ]
+  run hook Write "$W/projects/$SLUG/memory/run.sh" "$TP" "$SID";              [ -z "$output" ]
+  run hook Write "$W/projects/$SLUG/memory/sub/x.md" "$TP" "$SID";            [ -z "$output" ]
+  run hook Write "$W/projects/$SLUG/memory/../../../../x.md" "$TP" "$SID";    [ -z "$output" ]
+  run hook Write "$W/projects/$SLUG/memory/.hidden.md" "$TP" "$SID";          [ -z "$output" ]
+  run hook Write "$HOME/.claude/projects/$SLUG/memory/note.md" "$TP" "$SID";  [ -z "$output" ]
+  run hook Write "$W/settings.json" "$TP" "$SID";                             [ -z "$output" ]
+}
+
+@test "hook: no answer when the transcript is not this session's" {
+  shared_work
+  run hook Write "$W/projects/$SLUG/memory/note.md" "$W/projects/$SLUG/other-session.jsonl" "$SID"
+  [ -z "$output" ]
+  run hook Write "$W/projects/$SLUG/memory/note.md" "$TP" ""
+  [ -z "$output" ]
+}
+
+@test "hook: no answer when projects/ is not shared, or for the default profile" {
+  ca setup work >/dev/null 2>&1
+  W="$HOME/.claude-work"
+  mkdir -p "$W/projects/-repo-a"
+  run hook Write "$W/projects/-repo-a/memory/note.md" "$W/projects/-repo-a/s1.jsonl" s1
+  [ -z "$output" ]
+  shared_work
+  run bash -c "printf '{}' | env -u CLAUDE_CONFIG_DIR '$TEST_BASH' '$SCRIPT' hook permission-request"
+  [ -z "$output" ]
+}
+
+@test "hook: no answer when the memory folder or the file leads outside the base" {
+  shared_work
+  mkdir -p "$TESTTMP/elsewhere"
+  ln -s "$TESTTMP/elsewhere" "$HOME/.claude/projects/$SLUG/memory"
+  run hook Write "$W/projects/$SLUG/memory/note.md" "$TP" "$SID"
+  [ -z "$output" ]
+  rm "$HOME/.claude/projects/$SLUG/memory"; mkdir "$HOME/.claude/projects/$SLUG/memory"
+  ln -s "$TESTTMP/elsewhere/target.md" "$HOME/.claude/projects/$SLUG/memory/link.md"
+  run hook Write "$W/projects/$SLUG/memory/link.md" "$TP" "$SID"
+  [ -z "$output" ]
+}
+
+@test "hook: no answer for other events, or paths containing a newline" {
+  shared_work
+  run bash -c "jq -n '{hook_event_name: \"PreToolUse\", tool_name: \"Write\", tool_input: {file_path: \"$W/projects/$SLUG/memory/n.md\"}, transcript_path: \"$TP\", session_id: \"$SID\"}' | CLAUDE_CONFIG_DIR='$W' '$TEST_BASH' '$SCRIPT' hook permission-request"
+  [ -z "$output" ]
+  run hook Write "$W/projects/$SLUG/memory/a
+b.md" "$TP" "$SID"
+  [ -z "$output" ]
+}
+
+@test "hook: allows memory of the git repo's main worktree from a linked worktree" {
+  command -v git >/dev/null || skip "git not installed"
+  shared_work
+  local main="$TESTTMP/my repo" wt="$TESTTMP/my repo-wt" mslug wslug
+  git init -q "$main"
+  git -C "$main" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+  git -C "$main" worktree add -q --detach "$wt"
+  main="$(cd "$main" && pwd -P)"; wt="$(cd "$wt" && pwd -P)"
+  mslug="${main//[^a-zA-Z0-9]/-}"; wslug="${wt//[^a-zA-Z0-9]/-}"
+  mkdir -p "$HOME/.claude/projects/$wslug"; : > "$HOME/.claude/projects/$wslug/$SID.jsonl"
+  run hook Write "$W/projects/$mslug/memory/note.md" "$W/projects/$wslug/$SID.jsonl" "$SID" "$wt"
+  [[ "$output" == *"$ALLOW"* ]] || false
+}
+
+@test "hook: allows reading the session's own saved tool output only" {
+  shared_work
+  mkdir -p "$HOME/.claude/projects/$SLUG/$SID/tool-results"; echo big > "$HOME/.claude/projects/$SLUG/$SID/tool-results/r1.txt"
+  run hook Read "$W/projects/$SLUG/$SID/tool-results/r1.txt" "$TP" "$SID"
+  [[ "$output" == *"$ALLOW"* ]] || false
+  run hook Read "$W/projects/$SLUG/other-session/tool-results/r1.txt" "$TP" "$SID"
+  [ -z "$output" ]
+  run hook Read "$W/projects/$SLUG/$SID.jsonl" "$TP" "$SID"
+  [ -z "$output" ]
+}
+
+@test "hook: allows the plan file in plan mode only" {
+  shared_work
+  run hook Write "$W/plans/happy-plan.md" "$TP" "$SID" /nowhere plan
+  [[ "$output" == *"$ALLOW"* ]] || false
+  run hook Write "$W/plans/happy-plan.md" "$TP" "$SID" /nowhere default
+  [ -z "$output" ]
+}
+
+@test "launch adds the hook only for profiles that share projects/ or plans/" {
+  ca setup work >/dev/null 2>&1
+  run ca work -p hi
+  [[ "$output" == *"ARGS=-p hi"* ]] || false
+  write_config "share_add = projects"
+  ca setup work >/dev/null 2>&1
+  run ca work -p hi
+  [[ "$output" == *'ARGS=--settings {"hooks":{"PermissionRequest":[{"matcher":"Write|Edit|MultiEdit|Read"'*'claude-as\" hook permission-request"'*' -p hi'* ]] || false
+}
+
+@test "launch skips the hook for claude subcommands, a user's own --settings, or CLAUDE_AS_NO_HOOK" {
+  write_config "share_add = projects"
+  ca setup work >/dev/null 2>&1
+  run ca work auth status
+  [[ "$output" == *"ARGS=auth status"* ]] || false
+  run ca work --settings mine.json -p hi
+  [[ "$output" == *"ARGS=--settings mine.json -p hi"* ]] || false
+  [[ "$output" == *"workaround for shared projects/"*"is off for this run"* ]] || false
+  CLAUDE_AS_NO_HOOK=1 run ca work -p hi
+  [[ "$output" == *"ARGS=-p hi"* ]] || false
+}
+
+@test "doctor finds plugin paths recorded under a profile and --fix rewrites them to the base" {
+  ca setup work >/dev/null 2>&1
+  mkdir -p "$HOME/.claude/plugins"
+  jq -n --arg w "$HOME/.claude-work/plugins/cache/m/demo/1.0" --arg b "$HOME/.claude/plugins/cache/m/other/2.0" \
+    '{version: 2, plugins: {"demo@m": [{installPath: $w}], "other@m": [{installPath: $b}]}}' > "$HOME/.claude/plugins/installed_plugins.json"
+  run ca doctor work
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"installed_plugins.json: 1 path(s) recorded under this profile"* ]] || false
+  run ca doctor work --fix
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.plugins["demo@m"][0].installPath' "$HOME/.claude/plugins/installed_plugins.json")" = "$HOME/.claude/plugins/cache/m/demo/1.0" ]
+  [ "$(jq -r '.plugins["other@m"][0].installPath' "$HOME/.claude/plugins/installed_plugins.json")" = "$HOME/.claude/plugins/cache/m/other/2.0" ]
+  run ca doctor work
+  [ "$status" -eq 0 ]
+}

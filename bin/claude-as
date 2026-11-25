@@ -17,7 +17,7 @@
 # shellcheck disable=SC2088,SC2016
 set -euo pipefail
 
-CLAUDE_AS_VERSION="0.2.0"
+CLAUDE_AS_VERSION="0.3.0"
 PROG="claude-as"
 
 die()  { echo "$PROG: $*" >&2; exit 1; }
@@ -166,7 +166,7 @@ have_jq() { command -v "$JQ" >/dev/null 2>&1; }
 
 # --- profiles ----------------------------------------------------------------
 
-RESERVED="list ls setup link env import sync doctor help version"
+RESERVED="list ls setup link env import sync doctor hook help version"
 # Claude Code's own subcommands: `claude-as auth login` is almost certainly a
 # missing profile name, not a profile called "auth".
 CLAUDE_COMMANDS="agents attach auth auto-mode config doctor gateway import install logs mcp plugin plugins purge respawn rm setup-token stop kill ultrareview update upgrade migrate-installer"
@@ -411,7 +411,185 @@ cmd_run() {
   find_claude || exit 127
   require_profile "$name" confirm
   activate "$name"
+  if ! is_default "$name"; then
+    hook_settings
+    if [ -n "$HOOK_SETTINGS" ] && wants_hook "$@"; then
+      exec "$CLAUDE_BIN" --settings "$HOOK_SETTINGS" "$@"
+    fi
+  fi
   exec "$CLAUDE_BIN" "$@"
+}
+
+# --- working around anthropics/claude-code#98044 ------------------------------
+#
+# When projects/ or plans/ is shared (a symlink into the base), Claude Code
+# 2.1.280+ judges three kinds of access by where the symlink lands, finds that
+# outside CLAUDE_CONFIG_DIR, and prompts (headless: denies) with no way to
+# allow it (anthropics/claude-code#98044, #112052):
+#   - writing the session's own auto-memory (projects/<project>/memory/*.md)
+#   - reading the session's own saved tool output (projects/<project>/<session>/tool-results/)
+#   - writing the plan file in plan mode (plans/*.md)
+# Without a symlink Claude Code allows all three by itself. For profiles that
+# share those folders, claude-as gives Claude Code a PermissionRequest hook
+# (`claude-as hook permission-request`) that approves exactly these cases,
+# after checking that the real path lands inside the shared base. For anything
+# else the hook gives no answer, so the normal prompt appears.
+
+HOOK_MATCHER="Write|Edit|MultiEdit|Read"
+
+# find_self — sets SELF to the absolute path of this script, without a subshell.
+find_self() {
+  local d IFS
+  SELF=""
+  IFS=:; set -f
+  for d in $PATH; do
+    case "$d" in /*) ;; *) continue ;; esac
+    if [ -f "$d/claude-as" ] && [ -x "$d/claude-as" ]; then SELF="$d/claude-as"; break; fi
+  done
+  set +f; IFS=$' \t\n'
+  if [ -z "$SELF" ]; then
+    case "$0" in
+      /*) resolve_link "$0"; SELF="$RESOLVED" ;;
+      */*) resolve_link "$PWD/$0"; SELF="$RESOLVED" ;;
+    esac
+  fi
+  case "$SELF" in /*) return 0 ;; *) return 1 ;; esac
+}
+
+# hook_settings — sets HOOK_SETTINGS to the JSON for `claude --settings`, or to
+# "" when the profile doesn't share projects/ or plans/ (so no hook is needed),
+# or when it can't be added safely.
+hook_settings() {
+  HOOK_SETTINGS=""
+  [ -L "$PDIR/projects" ] || [ -L "$PDIR/plans" ] || return 0
+  [ -z "${CLAUDE_AS_NO_HOOK:-}" ] || return 0
+  have_jq || return 0
+  find_self || return 0
+  case "$SELF" in *[\"\\\$\`]*) return 0 ;; esac
+  HOOK_SETTINGS='{"hooks":{"PermissionRequest":[{"matcher":"'"$HOOK_MATCHER"'","hooks":[{"type":"command","command":"\"'"$SELF"'\" hook permission-request"}]}]}}'
+}
+
+# wants_hook <claude args...> — not for claude's own subcommands (auth, mcp,
+# ...), and not when the user passes their own --settings (claude takes only
+# one; theirs wins and the workaround is off for that run).
+wants_hook() {
+  local a
+  if [ $# -gt 0 ] && in_list "$1" "$CLAUDE_COMMANDS"; then return 1; fi
+  for a in "$@"; do
+    case "$a" in
+      --settings|--settings=*)
+        warn "note: you passed --settings, so the workaround for shared projects/ (anthropics/claude-code#98044) is off for this run"
+        return 1 ;;
+    esac
+  done
+  return 0
+}
+
+# phys <dir> — the physical path of an existing directory ("" if none).
+phys() { (cd -P -- "$1" 2>/dev/null && pwd -P) || true; }
+
+# shared_into <profile-item> <base-item> — the profile item is a symlink that
+# resolves to the base item.
+shared_into() {
+  local a b
+  [ -L "$1" ] || return 1
+  a="$(phys "$1")"; b="$(phys "$2")"
+  [ -n "$a" ] && [ "$a" = "$b" ]
+}
+
+# lands_in <dir> <root> — the nearest existing ancestor of dir (or dir itself)
+# lies physically inside root.
+lands_in() {
+  local p="$1" root
+  root="$(phys "$2")"
+  [ -n "$root" ] || return 1
+  while [ ! -d "$p" ]; do
+    p="${p%/*}"
+    [ -n "$p" ] || return 1
+  done
+  case "$(phys "$p")/" in "$root/"*) return 0 ;; esac
+  return 1
+}
+
+# git_memory_slug <cwd> — sets GSLUG to the project name Claude Code uses for
+# auto-memory in a git repository: the main worktree's path, with every
+# character other than a letter or digit replaced by "-".
+git_memory_slug() {
+  local d r
+  command -v git >/dev/null 2>&1 || return 1
+  d="$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
+  r="${d%/.git}"
+  [ -n "$r" ] && [ "$r" != "$d" ] || return 1
+  GSLUG="${r//[^a-zA-Z0-9]/-}"
+}
+
+# hook_allows — read a PermissionRequest event on stdin; true only for the
+# three accesses described above, by this session, landing in the base.
+hook_allows() {
+  local cfg="${CLAUDE_CONFIG_DIR:-}" line ev tool f tp sid cwd mode rest slug name tslug="" IFS
+  [ -n "$cfg" ] && have_jq || return 1
+  case "$cfg" in /*) ;; *) return 1 ;; esac
+  [ "$cfg" -ef "$BASE" ] && return 1
+  # One line, fields separated by the unit separator; refuse values that
+  # contain a newline or that separator.
+  line="$("$JQ" -r '[.hook_event_name, .tool_name, (.tool_input.file_path // ""), (.transcript_path // ""),
+                      (.session_id // ""), (.cwd // ""), (.permission_mode // "")]
+                     | map(tostring)
+                     | if any(.[]; test("[\n\u001f]")) then empty else join("\u001f") end' 2>/dev/null)" || return 1
+  [ -n "$line" ] || return 1
+  IFS=$'\037' read -r ev tool f tp sid cwd mode <<< "$line"
+  [ "$ev" = PermissionRequest ] || return 1
+  case "$f" in /*) ;; *) return 1 ;; esac
+  case "$f/" in */../*|*/./*|*//*) return 1 ;; esac
+  [ -L "$f" ] && return 1                          # never through a symlinked file
+  case "$sid" in ""|*[!A-Za-z0-9_-]*) sid="" ;; esac
+  # This session's transcript is $cfg/projects/<project>/<session>.jsonl.
+  if [ -n "$sid" ]; then
+    case "$tp" in
+      "$cfg/projects/"*"/$sid.jsonl")
+        tslug="${tp#"$cfg/projects/"}"; tslug="${tslug%"/$sid.jsonl"}"
+        case "$tslug" in ""|*/*|.|..) tslug="" ;; esac ;;
+    esac
+  fi
+  case "$tool" in
+    Write|Edit|MultiEdit)
+      case "$f" in
+        "$cfg/projects/"*/memory/*.md)
+          rest="${f#"$cfg/projects/"}"; slug="${rest%%/*}"; name="${rest#"$slug/memory/"}"
+          case "$slug" in ""|.|..) return 1 ;; esac
+          case "$name" in ""|*/*|.*) return 1 ;; esac
+          # The session's own project: its transcript's, or its git repo's.
+          if [ "$slug" != "$tslug" ]; then
+            git_memory_slug "$cwd" && [ "$slug" = "$GSLUG" ] || return 1
+          fi
+          shared_into "$cfg/projects" "$BASE/projects" && lands_in "${f%/*}" "$BASE/projects"
+          return ;;
+        "$cfg/plans/"*.md)
+          [ "$mode" = plan ] || return 1
+          name="${f#"$cfg/plans/"}"
+          case "$name" in ""|*/*|.*) return 1 ;; esac
+          shared_into "$cfg/plans" "$BASE/plans" && lands_in "${f%/*}" "$BASE/plans"
+          return ;;
+      esac ;;
+    Read)
+      [ -n "$tslug" ] || return 1
+      case "$f" in
+        "$cfg/projects/$tslug/$sid/tool-results/"*)
+          name="${f#"$cfg/projects/$tslug/$sid/tool-results/"}"
+          case "$name" in ""|*/*) return 1 ;; esac
+          shared_into "$cfg/projects" "$BASE/projects" && lands_in "${f%/*}" "$BASE/projects"
+          return ;;
+      esac ;;
+  esac
+  return 1
+}
+
+cmd_hook() {
+  [ "${1:-}" = permission-request ] || { echo "usage: $PROG hook permission-request   (run by Claude Code)" >&2; exit 2; }
+  if hook_allows; then
+    printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
+  fi
+  exit 0
 }
 
 # --- subcommands --------------------------------------------------------------
@@ -657,8 +835,44 @@ doctor_profile() {
         fix_drift "$RESOLVED" "$dir/$n" || problems=$((problems + 1)) ;;
     esac
   done
+  if [ -L "$dir/plugins" ] && have_jq; then
+    plugin_paths "$dir" "$fix" || problems=$((problems + 1))
+  fi
+  if [ -L "$dir/projects" ] || [ -L "$dir/plans" ]; then
+    echo "  note     projects/ or plans/ is shared; claude-as adds its permission hook at launch (anthropics/claude-code#98044)"
+  fi
   [ "$problems" -eq 0 ] && [ "$fix" = 0 ] && echo "  ok: all shared items linked"
   return "$problems"
+}
+
+# plugin_paths <profile-dir> <fix> — plugins installed from a profile record
+# their paths under that profile (~/.claude-x/plugins/...), although the files
+# live in the shared plugins/. Deleting the profile would then orphan them.
+# --fix rewrites those paths to the base's spelling: the same files.
+plugin_paths() {
+  local dir="$1" fix="$2" f n tmp prefix="$1/plugins/" to="$BASE/plugins/" rc=0
+  for f in "$BASE/plugins/installed_plugins.json" "$BASE/plugins/known_marketplaces.json"; do
+    [ -f "$f" ] || continue
+    n="$("$JQ" --arg p "$prefix" '[.. | strings | select(startswith($p))] | length' "$f" 2>/dev/null || echo 0)"
+    [ "${n:-0}" -gt 0 ] 2>/dev/null || continue
+    if [ "$fix" = 0 ]; then
+      echo "  plugins  ${f##*/}: $n path(s) recorded under this profile (--fix rewrites them to $to, the same files)"
+      rc=1; continue
+    fi
+    tmp="$f.tmp.$$"
+    # Rewrite a snapshot, and replace the file only if it hasn't changed since.
+    if cp -p "$f" "$f.orig.$$" && cp -p "$f" "$tmp" &&
+       "$JQ" --arg p "$prefix" --arg b "$to" \
+         'walk(if type == "string" and startswith($p) then $b + .[($p | length):] else . end)' "$f.orig.$$" > "$tmp" &&
+       cmp -s "$f.orig.$$" "$f" && mv "$tmp" "$f"; then
+      echo "  fixed    plugins: rewrote $n path(s) in ${f##*/} to $to"
+    else
+      echo "  FAILED   plugins: could not rewrite ${f##*/} (it may have changed meanwhile; run doctor again)"
+      rc=1
+    fi
+    rm -f "$tmp" "$f.orig.$$"
+  done
+  return "$rc"
 }
 
 # Warn about credentials that override every profile's own /login (Claude Code
@@ -738,6 +952,7 @@ main() {
     import) cmd_import "$@" ;;
     sync)   cmd_sync "$@" ;;
     doctor) cmd_doctor "$@" ;;
+    hook)   cmd_hook "$@" ;;
     -*) echo "$PROG: unknown option '$cmd' (see: $PROG help)" >&2; exit 2 ;;
     *)  cmd_run "$cmd" "$@" ;;
   esac
