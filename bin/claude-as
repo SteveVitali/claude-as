@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# claude-as — run Claude Code as one of several accounts, sharing everything else.
+# claude-as — run Claude Code as any number of accounts, sharing one setup.
 # https://github.com/SteveVitali/claude-as · MIT License
 #
 # Each non-default profile is its own CLAUDE_CONFIG_DIR (~/.claude-<name>), so
@@ -23,14 +23,14 @@ warn() { echo "$PROG: $*" >&2; }
 
 usage() {
   cat <<'EOF'
-claude-as — run Claude Code as one of several accounts, sharing everything else.
+claude-as — run Claude Code as any number of accounts, sharing one setup.
 
 Usage:
   claude-as <profile> [claude args...]   Run claude as <profile> (created on first use)
   claude-as list                         List profiles and the account each is logged into
   claude-as setup <profile>              Create or refresh <profile> without starting claude
   claude-as link <profile> [dir]         Add a `claude-<profile>` command (default dir: ~/.local/bin)
-  claude-as env <profile>                Print shell exports, e.g. eval "$(claude-as env work)"
+  claude-as env <profile>                Print shell exports, e.g. eval "$(claude-as env alt)"
   claude-as import <profile> <session>   Copy a session from another profile so <profile> can --resume it
   claude-as sync <profile>               Copy MCP servers + project trust from the default profile
   claude-as doctor [profile] [--fix]     Check the shared links and auth overrides; --fix repairs links
@@ -38,16 +38,17 @@ Usage:
 
 Profiles:
   default    ~/.claude, exactly as plain `claude` uses it (aliases: see default_aliases)
-  <name>     ~/.claude-<name>: its own login, account state and transcripts;
-             settings, CLAUDE.md, skills, agents, commands, plugins and prompt
-             history are shared with ~/.claude through symlinks
+  <name>     any number of named profiles, each in ~/.claude-<name> with its own
+             login, account state and transcripts; settings, CLAUDE.md, skills,
+             agents, commands, plugins and prompt history are shared with
+             ~/.claude through symlinks
 
 Examples:
-  claude-as work                 # first run: type /login and sign in to the work account
-  claude-as work auth login      # ...or log in without opening the TUI
-  claude-as link work            # now `claude-work` works too
-  claude-as import work <id>     # bring a default-profile session over...
-  claude-as work --resume <id>   # ...and resume it as work
+  claude-as alt                  # first run: type /login and sign in to that account
+  claude-as alt auth login       # ...or log in without opening the TUI
+  claude-as link alt             # now `claude-alt` works too
+  claude-as import alt <id>      # bring a default-profile session over...
+  claude-as alt --resume <id>    # ...and resume it as alt
 
 Config file: ${XDG_CONFIG_HOME:-~/.config}/claude-as/config — see the README.
 EOF

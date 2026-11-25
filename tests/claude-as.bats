@@ -467,3 +467,28 @@ make_session() { # <config-dir> <slug> <sid>
   run ca doctor
   [[ "$output" == *"shared settings.json sets ANTHROPIC_API_KEY, apiKeyHelper"* ]]
 }
+
+# --- many accounts ----------------------------------------------------------------
+
+@test "any number of profiles coexist, each with its own config dir, all sharing one setup" {
+  for p in a b c d; do ca setup "$p" >/dev/null 2>&1; done
+  for p in a b c d; do
+    run ca "$p"
+    [[ "$output" == *"CONFIG_DIR=$HOME/.claude-$p"* ]]
+    assert_link "$HOME/.claude-$p/settings.json" "$HOME/.claude/settings.json"
+  done
+  run ca list
+  [ "$(echo "$output" | grep -cE '^[ *] (default|a|b|c|d) ')" -eq 5 ]
+  run ca doctor
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | grep -c 'ok: all shared items linked')" -eq 4 ]
+}
+
+@test "import moves a session between two non-default profiles" {
+  ca setup a; ca setup b
+  make_session "$HOME/.claude-a" -repo-c 33333333-cccc
+  run ca import b 33333333-cccc
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"from ~/.claude-a into ~/.claude-b"* ]]
+  [ -f "$HOME/.claude-b/projects/-repo-c/33333333-cccc.jsonl" ]
+}

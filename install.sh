@@ -40,6 +40,6 @@ fi
 
 echo ""
 echo "Next steps:"
-echo "  claude-as work auth login    # create a 'work' profile and sign in"
-echo "  claude-as link work          # optional: adds a 'claude-work' command"
+echo "  claude-as alt auth login    # create an 'alt' profile and sign in"
+echo "  claude-as link alt          # optional: adds a 'claude-alt' command"
 echo "  claude-as list"

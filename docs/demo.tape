@@ -23,11 +23,15 @@ Type "claude-as list"
 Enter
 Sleep 2s
 
-Type "claude-as work auth login"
+Type "claude-as alt auth login"
 Enter
-Sleep 2.5s
+Sleep 2s
 
-Type "claude-as link work"
+Type "claude-as alt2 auth login"
+Enter
+Sleep 2s
+
+Type "claude-as link alt"
 Enter
 Sleep 1.5s
 
@@ -35,14 +39,10 @@ Type "claude-as list"
 Enter
 Sleep 3s
 
-Type "claude-work auth status"
-Enter
-Sleep 2.5s
-
-Type "ls ~/.claude-work/skills    # shared with ~/.claude"
+Type "ls ~/.claude-alt2/skills    # shared with ~/.claude"
 Enter
 Sleep 2s
 
-Type "claude-as doctor work | tail -2"
+Type "claude-as doctor | tail -4"
 Enter
 Sleep 4s

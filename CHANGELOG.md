@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- Docs, help text and demo describe any number of accounts generically
+  (examples use `alt` / `alt2` instead of work/personal), and a test covers
+  four profiles at once plus imports between non-default profiles.
+
 ## [0.1.0] - 2026-11-25
 
 ### Added
