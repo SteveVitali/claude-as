@@ -1,21 +1,23 @@
 #!/usr/bin/env bash
-# claude-as — run Claude Code as any number of accounts, sharing one setup.
+# claude-as — multiple Claude Code accounts on one machine: separate logins, one shared setup.
 # https://github.com/SteveVitali/claude-as · MIT License
 #
-# Each non-default profile is its own CLAUDE_CONFIG_DIR (~/.claude-<name>), so
-# it has its own login, account state, transcripts and running-session state.
-# The setup worth sharing (settings, CLAUDE.md, skills, agents, commands,
-# plugins, history...) is symlinked back into ~/.claude.
+# Each named profile is its own CLAUDE_CONFIG_DIR (~/.claude-<name>), so it has
+# its own login, account state, transcripts and running-session state. The
+# setup worth sharing (settings, CLAUDE.md, skills, agents, commands, plugins,
+# prompt history...) is symlinked back into ~/.claude.
 #
 # Portable to the stock bash 3.2 on macOS: no associative arrays, no mapfile,
-# and every array expansion is guarded for `set -u`.
+# and every array expansion is guarded for `set -u`. The launch path sticks to
+# shell builtins (no subshells or external commands once a profile exists), so
+# starting claude through claude-as costs a few milliseconds.
 #
 # SC2088: literal "~" strings are display text / user input to match, not paths.
 # SC2016: jq programs are single-quoted on purpose.
 # shellcheck disable=SC2088,SC2016
 set -euo pipefail
 
-CLAUDE_AS_VERSION="0.1.0"
+CLAUDE_AS_VERSION="0.2.0"
 PROG="claude-as"
 
 die()  { echo "$PROG: $*" >&2; exit 1; }
@@ -23,58 +25,106 @@ warn() { echo "$PROG: $*" >&2; }
 
 usage() {
   cat <<'EOF'
-claude-as — run Claude Code as any number of accounts, sharing one setup.
+claude-as — multiple Claude Code accounts on one machine: separate logins, one shared setup.
 
 Usage:
-  claude-as <profile> [claude args...]   Run claude as <profile> (created on first use)
+  claude-as <profile> [claude args...]   Run claude as <profile>
   claude-as list                         List profiles and the account each is logged into
-  claude-as setup <profile>              Create or refresh <profile> without starting claude
+  claude-as setup <profile>              Create <profile> (or refresh its links)
   claude-as link <profile> [dir]         Add a `claude-<profile>` command (default dir: ~/.local/bin)
   claude-as env <profile>                Print shell exports, e.g. eval "$(claude-as env alt)"
   claude-as import <profile> <session>   Copy a session from another profile so <profile> can --resume it
   claude-as sync <profile>               Copy MCP servers + project trust from the default profile
-  claude-as doctor [profile] [--fix]     Check the shared links and auth overrides; --fix repairs links
+  claude-as doctor [profile] [--fix]     Check links and auth overrides; --fix relinks and merges copies
   claude-as help | version
 
 Profiles:
   default    ~/.claude, exactly as plain `claude` uses it (aliases: see default_aliases)
-  <name>     any number of named profiles, each in ~/.claude-<name> with its own
-             login, account state and transcripts; settings, CLAUDE.md, skills,
-             agents, commands, plugins and prompt history are shared with
-             ~/.claude through symlinks
+  <name>     as many named profiles as you like, each in ~/.claude-<name> with its
+             own login, account state and transcripts; settings, CLAUDE.md, skills,
+             agents, commands, plugins and prompt history are shared with ~/.claude
+             through symlinks
 
 Examples:
-  claude-as alt                  # first run: type /login and sign in to that account
-  claude-as alt auth login       # ...or log in without opening the TUI
-  claude-as link alt             # now `claude-alt` works too
-  claude-as import alt <id>      # bring a default-profile session over...
-  claude-as alt --resume <id>    # ...and resume it as alt
+  claude-as setup acme           # create a profile for another account
+  claude-as acme auth login      # sign in to it (or run `claude-as acme` and type /login)
+  claude-as acme                 # run Claude Code as that account
+  claude-as link acme            # optional: now `claude-acme` works too
+  claude-as import acme <id>     # copy a session from another profile, then:
+  claude-as acme --resume <id>
 
 Config file: ${XDG_CONFIG_HOME:-~/.config}/claude-as/config — see the README.
 EOF
 }
 
-# --- configuration -----------------------------------------------------------
+# --- small helpers (set globals instead of echoing, to avoid subshells) --------
 
-CONFIG_FILE="${CLAUDE_AS_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-as/config}"
-
-# cfg_get <key> — last `key = value` line in the config file wins.
-cfg_get() {
-  [ -f "$CONFIG_FILE" ] || return 0
-  sed -n -E "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$CONFIG_FILE" \
-    | sed -E 's/[[:space:]]+$//' | tail -n 1
+# trim <string> — sets TRIMMED to the string without surrounding whitespace.
+trim() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  TRIMMED="${s%"${s##*[![:space:]]}"}"
 }
 
-expand_tilde() { case "$1" in "~") echo "$HOME" ;; "~/"*) echo "$HOME/${1#\~/}" ;; *) echo "$1" ;; esac; }
+# expand_tilde <path> — sets EXPANDED, with a leading ~ replaced by $HOME.
+expand_tilde() {
+  case "$1" in "~") EXPANDED="$HOME" ;; "~/"*) EXPANDED="$HOME/${1#\~/}" ;; *) EXPANDED="$1" ;; esac
+}
+
+in_list() { case " $2 " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+short_path() { case "$1" in "$HOME"/*) echo "~/${1#"$HOME"/}" ;; *) echo "$1" ;; esac; }
+
+# --- configuration -------------------------------------------------------------
 
 # Keychain items are keyed to the exact CLAUDE_CONFIG_DIR string, so build
 # every path from one normalised HOME (no trailing slash).
-HOME="${HOME%/}"
+while [ "${#HOME}" -gt 1 ] && [ "${HOME%/}" != "$HOME" ]; do HOME="${HOME%/}"; done
+
+CONFIG_FILE="${CLAUDE_AS_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-as/config}"
+CFG_base_dir="" CFG_claude_bin="" CFG_default_aliases="" CFG_share_add="" CFG_share_skip=""
+
+# load_config — parse `key = value` lines once. Scalar keys: last one wins.
+# List keys (default_aliases, share_add, share_skip) accumulate across lines and
+# accept commas or spaces.
+load_config() {
+  [ -f "$CONFIG_FILE" ] || return 0
+  local line key n=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    trim "$line"; line="$TRIMMED"
+    case "$line" in
+      ""|"#"*) continue ;;
+      *=*) ;;
+      *) warn "$CONFIG_FILE:$n: expected 'key = value', ignoring this line"; continue ;;
+    esac
+    trim "${line%%=*}"; key="$TRIMMED"
+    trim "${line#*=}"
+    case "$key" in
+      base_dir)        CFG_base_dir="$TRIMMED" ;;
+      claude_bin)      CFG_claude_bin="$TRIMMED" ;;
+      default_aliases) CFG_default_aliases="$CFG_default_aliases $TRIMMED" ;;
+      share_add)       CFG_share_add="$CFG_share_add $TRIMMED" ;;
+      share_skip)      CFG_share_skip="$CFG_share_skip $TRIMMED" ;;
+      *) warn "$CONFIG_FILE:$n: unknown setting '$key', ignoring it" ;;
+    esac
+  done < "$CONFIG_FILE"
+  CFG_default_aliases="${CFG_default_aliases//,/ }"
+  CFG_share_add="${CFG_share_add//,/ }"
+  CFG_share_skip="${CFG_share_skip//,/ }"
+}
+load_config
+
 STOCK_BASE="$HOME/.claude"
-BASE="${CLAUDE_AS_BASE:-$(cfg_get base_dir)}"
-BASE="$(expand_tilde "${BASE:-$STOCK_BASE}")"
-BASE="${BASE%/}"
-DEFAULT_ALIASES="$(cfg_get default_aliases | tr ',' ' ')"
+expand_tilde "${CLAUDE_AS_BASE:-${CFG_base_dir:-$STOCK_BASE}}"
+BASE="$EXPANDED"
+while [ "${#BASE}" -gt 1 ] && [ "${BASE%/}" != "$BASE" ]; do BASE="${BASE%/}"; done
+# A relative base would make CLAUDE_CONFIG_DIR depend on the current folder
+# (and on it, which Keychain item claude uses).
+case "$BASE" in /*) ;; *) die "base_dir must be an absolute path or start with ~/ (got '$BASE')" ;; esac
+# The default profile's account file: ~/.claude.json for a stock setup.
+if [ "$BASE" = "$STOCK_BASE" ]; then BASE_ACCOUNT="$HOME/.claude.json"; else BASE_ACCOUNT="$BASE/.claude.json"; fi
+DEFAULT_ALIASES="$CFG_default_aliases"
 JQ="${CLAUDE_AS_JQ:-jq}"
 MARKER=".claude-as"
 
@@ -91,31 +141,35 @@ MARKER=".claude-as"
 DEFAULT_SHARE="settings.json CLAUDE.md keybindings.json history.jsonl skills agents commands output-styles plugins file-history todos hooks"
 SHARE_MKDIR=" skills agents commands output-styles plugins projects file-history todos plans "
 
-have_jq() { command -v "$JQ" >/dev/null 2>&1; }
-
-short_path() { case "$1" in "$HOME"/*) echo "~/${1#"$HOME"/}" ;; *) echo "$1" ;; esac; }
-
-in_list() { case " $2 " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
-
-share_list() {
-  local skip add n out=""
-  skip="$(cfg_get share_skip | tr ',' ' ')"
-  add="$(cfg_get share_add | tr ',' ' ')"
-  for n in $DEFAULT_SHARE $add; do
+# SHARE — the final list: defaults + share_add - share_skip, validated. Names
+# must be plain file or folder names (no globbing, no paths) and never account
+# state. Globbing is off while splitting, so an entry like `*` stays literal.
+build_share() {
+  local n out=""
+  set -f
+  for n in $DEFAULT_SHARE $CFG_share_add; do
     case "$n" in
-      ""|.|..|*/*|.claude.json|.credentials.json|"$MARKER")
-        warn "ignoring share entry '$n' (must be a plain name, and never account state)"; continue ;;
+      .|..|*[!A-Za-z0-9._-]*|.claude.json|.credentials.json|"$MARKER")
+        warn "ignoring share entry '$n' (it must be a plain name inside $BASE, and never account state)"
+        continue ;;
     esac
-    in_list "$n" "$skip" && continue
+    in_list "$n" "$CFG_share_skip" && continue
     in_list "$n" "$out" && continue
     out="$out $n"
   done
-  echo "$out"
+  set +f
+  SHARE="$out"
 }
+build_share
+
+have_jq() { command -v "$JQ" >/dev/null 2>&1; }
 
 # --- profiles ----------------------------------------------------------------
 
 RESERVED="list ls setup link env import sync doctor help version"
+# Claude Code's own subcommands: `claude-as auth login` is almost certainly a
+# missing profile name, not a profile called "auth".
+CLAUDE_COMMANDS="agents attach auth auto-mode config doctor gateway import install logs mcp plugin plugins purge respawn rm setup-token stop kill ultrareview update upgrade migrate-installer"
 
 valid_name() {
   case "$1" in ""|-*) return 1 ;; esac
@@ -125,15 +179,35 @@ valid_name() {
 check_name() {
   valid_name "$1" || { echo "$PROG: invalid profile name '$1' (use lowercase letters, digits, - and _)" >&2; exit 2; }
   if in_list "$1" "$RESERVED"; then echo "$PROG: '$1' is a claude-as command, not a profile name" >&2; exit 2; fi
+  if in_list "$1" "$CLAUDE_COMMANDS"; then
+    echo "$PROG: '$1' is a claude command, not a profile name; did you mean: $PROG <profile> $1 ..." >&2; exit 2
+  fi
   [ "$1" != as ] || { echo "$PROG: 'as' is reserved (claude-as is this tool's own name)" >&2; exit 2; }
+  if ! is_default "$1" && [ "$HOME/.claude-$1" -ef "$BASE" ]; then
+    echo "$PROG: ~/.claude-$1 is your base directory; use the default profile (or add '$1' to default_aliases)" >&2; exit 2
+  fi
 }
 
-# is_claude_as <file> — true if the file is this script (checks the first 2 KiB).
-# Reads into a variable rather than `head | grep -q`, which under pipefail can
-# report failure via SIGPIPE even when it matched.
+# overlaps <a> <b> — true if two paths are the same file or folder, or one
+# folder lies inside the other. Guards every operation that moves or deletes
+# files, so a misconfiguration can never merge the base into itself.
+overlaps() {
+  [ "$1" -ef "$2" ] && return 0
+  [ -d "$1" ] && [ -d "$2" ] || return 1
+  local a b
+  a="$(cd "$1" 2>/dev/null && pwd -P)/" || return 0
+  b="$(cd "$2" 2>/dev/null && pwd -P)/" || return 0
+  case "$a" in "$b"*) return 0 ;; esac
+  case "$b" in "$a"*) return 0 ;; esac
+  return 1
+}
+
+# is_claude_as <file> — true if the file is this script. Reads at most 2 KiB
+# with the `read` builtin; a binary stops at its first NUL byte, well before
+# the marker could appear.
 is_claude_as() {
-  local hdr
-  hdr="$(head -c 2048 "$1" 2>/dev/null | LC_ALL=C tr -d '\000' || true)"
+  local hdr=""
+  IFS= read -r -d '' -n 2048 hdr < "$1" 2>/dev/null || true
   case "$hdr" in *CLAUDE_AS_VERSION=*) return 0 ;; *) return 1 ;; esac
 }
 
@@ -141,17 +215,10 @@ is_default() { [ "$1" = default ] || in_list "$1" "$DEFAULT_ALIASES"; }
 
 display_default() { local a; for a in $DEFAULT_ALIASES; do echo "$a"; return; done; echo default; }
 
-profile_dir() {
-  if is_default "$1"; then echo "$BASE"; else echo "$HOME/.claude-$1"; fi
-}
-
-# The default profile's account file: ~/.claude.json for a stock setup.
-base_account_file() {
-  if [ "$BASE" = "$STOCK_BASE" ]; then echo "$HOME/.claude.json"; else echo "$BASE/.claude.json"; fi
-}
-
-account_file() {
-  if is_default "$1"; then base_account_file; else echo "$(profile_dir "$1")/.claude.json"; fi
+# profile_paths <name> — sets PDIR (its config dir) and AFILE (its account file).
+profile_paths() {
+  if is_default "$1"; then PDIR="$BASE"; AFILE="$BASE_ACCOUNT"
+  else PDIR="$HOME/.claude-$1"; AFILE="$PDIR/.claude.json"; fi
 }
 
 # account_label <account-file> — who the profile is logged in as.
@@ -166,21 +233,22 @@ account_label() {
   echo "${email:-(not logged in)}"
 }
 
-# resolve_link <path> — follow the path's own symlinks (not its parents') to
-# the final target. Claude Code follows only one hop when it saves a file, so
-# a profile must link straight to the real file, e.g. when ~/.claude/settings.json
-# is itself a dotfiles-manager symlink (anthropics/claude-code#78162).
+# resolve_link <path> — sets RESOLVED to the path with its own symlinks (not
+# its parents') followed to the final target. Claude Code follows only one hop
+# when it saves a file, so a profile must link straight to the real file, e.g.
+# when ~/.claude/settings.json is itself a dotfiles-manager symlink
+# (anthropics/claude-code#78162).
 resolve_link() {
   local p="$1" t i=0
   while [ -L "$p" ] && [ "$i" -lt 40 ]; do
     t="$(readlink "$p")"
-    case "$t" in /*) p="$t" ;; *) p="$(dirname "$p")/$t" ;; esac
+    case "$t" in /*) p="$t" ;; *) p="${p%/*}/$t" ;; esac
     i=$((i + 1))
   done
-  echo "$p"
+  RESOLVED="$p"
 }
 
-# item_state <base-path> <profile-path>:
+# item_state <base-path> <profile-path> — sets STATE to one of:
 #   ok       profile path is a symlink to the base path
 #   missing  nothing in the profile; the base has it (or will create it)
 #   absent   neither side has it
@@ -188,13 +256,15 @@ resolve_link() {
 #   drift    a real file/dir in the profile while the base has one too
 #   local    a real file/dir in the profile and none in the base
 item_state() {
-  local b="$1" p="$2"
+  local b="$1" p="$2" t
   if [ -L "$p" ]; then
-    case "$(readlink "$p")" in "$b"|"$(resolve_link "$b")") echo ok ;; *) echo foreign ;; esac
+    t="$(readlink "$p")"
+    resolve_link "$b"
+    if [ "$t" = "$b" ] || [ "$t" = "$RESOLVED" ]; then STATE=ok; else STATE=foreign; fi
   elif [ -e "$p" ]; then
-    if [ -e "$b" ] || [ -L "$b" ]; then echo drift; else echo local; fi
-  elif [ -e "$b" ] || [ -L "$b" ]; then echo missing
-  else echo absent
+    if [ -e "$b" ] || [ -L "$b" ]; then STATE=drift; else STATE=local; fi
+  elif [ -e "$b" ] || [ -L "$b" ]; then STATE=missing
+  else STATE=absent
   fi
 }
 
@@ -207,13 +277,13 @@ ensure_base_item() {
   fi
 }
 
-# Seed a new profile's .claude.json from the default one: keep onboarding
-# flags, per-project trust and MCP servers; drop identity and caches.
+# seed_account_file <profile-dir> — give a new profile a .claude.json copied
+# from the default one: keep onboarding flags, per-project trust and MCP
+# servers; drop the account identity, IDs and caches.
 seed_account_file() {
-  local src dst="$1/.claude.json" tmp
-  src="$(base_account_file)"
+  local dst="$1/.claude.json" tmp
   [ -e "$dst" ] && return 0
-  [ -f "$src" ] || return 0
+  [ -f "$BASE_ACCOUNT" ] || return 0
   if ! have_jq; then
     warn "jq not found: skipping seeding of $dst (claude will run its first-time setup)"
     return 0
@@ -223,56 +293,79 @@ seed_account_file() {
    "$JQ" 'del(.oauthAccount, .userID, .anonymousId, .primaryApiKey,
               .customApiKeyResponses, .remoteControlMachineId)
           | with_entries(select(.key | test("[Cc]ache|^cached|^passes") | not))' \
-     "$src" > "$tmp") || { rm -f "$tmp"; warn "could not seed $dst from $src"; return 0; }
-  mv "$tmp" "$dst"
+     "$BASE_ACCOUNT" > "$tmp") || { rm -f "$tmp"; warn "could not seed $dst from $BASE_ACCOUNT"; return 0; }
+  # A hard link publishes the file atomically and never replaces one that a
+  # concurrently started claude has already written.
+  ln "$tmp" "$dst" 2>/dev/null || true
+  rm -f "$tmp"
 }
 
-# setup_profile <name> [quiet] — idempotent; never moves or deletes anything.
+# setup_profile <name> — idempotent; never moves or deletes anything. Items
+# that are already symlinks (ours, or a deliberate choice) are left as they
+# are without being inspected, so this is cheap on every launch.
 setup_profile() {
-  local name="$1" dir n state
-  dir="$(profile_dir "$name")"
+  local name="$1" dir n p
+  profile_paths "$name"; dir="$PDIR"
   [ -d "$BASE" ] || die "base config dir $BASE does not exist (run plain 'claude' once first)"
+  [ "$dir" -ef "$BASE" ] && die "profile '$name' resolves to the base directory $BASE; refusing to link it to itself"
+  CREATED=0
   if [ ! -d "$dir" ]; then
     (umask 077; mkdir -p "$dir")
+    CREATED=1
     warn "created profile '$name' at $(short_path "$dir")"
   fi
   [ -f "$dir/$MARKER" ] || echo "claude-as profile: $name" > "$dir/$MARKER"
-  for n in $(share_list); do
+  for n in $SHARE; do
+    p="$dir/$n"
+    [ -L "$p" ] && continue
     ensure_base_item "$n"
-    state="$(item_state "$BASE/$n" "$dir/$n")"
-    case "$state" in
-      missing) ln -s "$(resolve_link "$BASE/$n")" "$dir/$n" ;;
-      drift|local) warn "$dir/$n is the profile's own copy, not the shared one (merge it in: $PROG doctor $name --fix)" ;;
-    esac
+    if [ -e "$p" ]; then
+      warn "$p is the profile's own copy, not the shared one (merge it in: $PROG doctor $name --fix)"
+      continue
+    fi
+    [ -e "$BASE/$n" ] || [ -L "$BASE/$n" ] || continue
+    resolve_link "$BASE/$n"
+    # -n: never descend into a link that a concurrent first launch just made.
+    ln -sn "$RESOLVED" "$p" 2>/dev/null || [ -L "$p" ] || die "could not link $p to $RESOLVED"
   done
   seed_account_file "$dir"
 }
 
-profile_exists() { [ -f "$(profile_dir "$1")/$MARKER" ]; }
+profile_exists() { profile_paths "$1"; [ -f "$PDIR/$MARKER" ]; }
 
 all_profiles() {
-  local d
+  local d name
   for d in "$HOME"/.claude-*; do
     [ -f "$d/$MARKER" ] || continue
-    echo "${d##*/.claude-}"
+    name="${d##*/.claude-}"
+    valid_name "$name" || continue
+    is_default "$name" && continue
+    [ "$d" -ef "$BASE" ] && continue
+    echo "$name"
   done
+  return 0
 }
 
 # --- finding and running claude -----------------------------------------------
 
+# find_claude — sets CLAUDE_BIN, or prints why not and returns 127.
 find_claude() {
-  local c="${CLAUDE_AS_BIN:-$(cfg_get claude_bin)}"
-  c="$(expand_tilde "$c")"
+  local c d IFS
+  expand_tilde "${CLAUDE_AS_BIN:-$CFG_claude_bin}"; c="$EXPANDED"
   if [ -z "$c" ]; then
-    c="$(command -v claude 2>/dev/null || true)"
+    IFS=:; set -f
+    for d in $PATH; do
+      [ -f "${d:-.}/claude" ] && [ -x "${d:-.}/claude" ] && { c="${d:-.}/claude"; break; }
+    done
+    set +f; IFS=$' \t\n'
     [ -n "$c" ] || { echo "$PROG: 'claude' not found on PATH (set claude_bin in $CONFIG_FILE or CLAUDE_AS_BIN)" >&2; return 127; }
   fi
-  [ -x "$c" ] || { echo "$PROG: claude binary '$c' is not executable" >&2; return 127; }
+  [ -f "$c" ] && [ -x "$c" ] || { echo "$PROG: claude binary '$c' is not an executable file" >&2; return 127; }
   # Refuse to exec ourselves (e.g. someone linked claude-as as `claude`).
   if is_claude_as "$c"; then
     echo "$PROG: '$c' is claude-as itself; set claude_bin to the real claude" >&2; return 127
   fi
-  echo "$c"
+  CLAUDE_BIN="$c"
 }
 
 activate() {
@@ -284,33 +377,68 @@ activate() {
     if [ "$BASE" = "$STOCK_BASE" ]; then unset CLAUDE_CONFIG_DIR; else export CLAUDE_CONFIG_DIR="$BASE"; fi
   else
     setup_profile "$name"
-    export CLAUDE_CONFIG_DIR
-    CLAUDE_CONFIG_DIR="$(profile_dir "$name")"
+    export CLAUDE_CONFIG_DIR="$PDIR"
   fi
   export CLAUDE_AS_PROFILE="$name"
 }
 
+# require_profile <name> [confirm] — make sure a named profile exists. With
+# "confirm", offer to create it when stdin and stderr are a terminal (so a typo
+# like `claude-as acme2` doesn't silently create an account profile);
+# otherwise point at `setup`.
+require_profile() {
+  local name="$1" mode="${2:-}" ans=""
+  is_default "$name" && return 0
+  profile_exists "$name" && return 0
+  if [ "$mode" = confirm ] && [ -t 0 ] && [ -t 2 ]; then
+    if [ -d "$PDIR" ]; then
+      printf '%s: %s exists but is not a claude-as profile yet. Set it up as profile %s? [y/N] ' "$PROG" "$(short_path "$PDIR")" "'$name'" >&2
+    else
+      printf "%s: there is no profile '%s' yet. Create it (a new, separate login) at %s? [y/N] " "$PROG" "$name" "$(short_path "$PDIR")" >&2
+    fi
+    read -r ans || true
+    case "$ans" in y|Y|yes|YES) return 0 ;; esac
+    exit 1
+  fi
+  echo "$PROG: there is no profile '$name' (create it with: $PROG setup $name)" >&2
+  exit 1
+}
+
 cmd_run() {
-  local name="$1" claude
+  local name="$1"
   shift
   check_name "$name"
-  claude="$(find_claude)" || exit 127
+  find_claude || exit 127
+  require_profile "$name" confirm
   activate "$name"
-  exec "$claude" "$@"
+  exec "$CLAUDE_BIN" "$@"
 }
 
 # --- subcommands --------------------------------------------------------------
 
-
 cmd_list() {
-  local p cur="${CLAUDE_AS_PROFILE:-}" mark name
-  printf '  %-14s %-28s %s\n' PROFILE ACCOUNT "CONFIG DIR"
-  name="$(display_default)"
-  mark=" "; { [ -n "$cur" ] && is_default "$cur"; } && mark="*"
-  printf '%s %-14s %-28s %s\n' "$mark" "$name" "$(account_label "$(base_account_file)")" "$(short_path "$BASE")"
-  for p in $(all_profiles); do
-    mark=" "; [ "$p" = "$cur" ] && mark="*"
-    printf '%s %-14s %-28s %s\n' "$mark" "$p" "$(account_label "$(account_file "$p")")" "$(short_path "$(profile_dir "$p")")"
+  local cur="${CLAUDE_AS_PROFILE:-}" p name label mark n=0 i w1=7 w2=7
+  local -a names accts dirs marks
+  for p in default $(all_profiles); do
+    profile_paths "$p"
+    label="$(account_label "$AFILE")"
+    if [ "$p" = default ]; then
+      name="$(display_default)"
+      mark=" "; { [ -n "$cur" ] && is_default "$cur"; } && mark="*"
+    else
+      name="$p"
+      mark=" "; [ "$p" = "$cur" ] && mark="*"
+    fi
+    names[n]="$name"; accts[n]="$label"; dirs[n]="$(short_path "$PDIR")"; marks[n]="$mark"
+    [ "${#name}" -gt "$w1" ] && w1=${#name}
+    [ "${#label}" -gt "$w2" ] && w2=${#label}
+    n=$((n + 1))
+  done
+  printf "  %-${w1}s   %-${w2}s   %s\n" PROFILE ACCOUNT "CONFIG DIR"
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    printf "%s %-${w1}s   %-${w2}s   %s\n" "${marks[i]}" "${names[i]}" "${accts[i]}" "${dirs[i]}"
+    i=$((i + 1))
   done
 }
 
@@ -319,9 +447,9 @@ cmd_setup() {
   check_name "$1"
   if is_default "$1"; then echo "$PROG: '$1' is the default profile ($BASE); nothing to set up"; return 0; fi
   setup_profile "$1"
-  echo "$PROG: profile '$1' is ready at $(short_path "$(profile_dir "$1")")"
-  [ "$(account_label "$(account_file "$1")")" = "(not logged in)" ] &&
-    echo "$PROG: log in with:  $PROG $1 auth login   (or /login inside claude)"
+  [ "$CREATED" = 1 ] || echo "$PROG: profile '$1' is set up at $(short_path "$PDIR")"
+  [ "$(account_label "$AFILE")" = "(not logged in)" ] &&
+    echo "$PROG: next, sign in to its account:  $PROG $1 auth login"
   return 0
 }
 
@@ -338,13 +466,17 @@ cmd_link() {
   [ $# -ge 1 ] && [ $# -le 2 ] || { echo "usage: $PROG link <profile> [dir]" >&2; exit 2; }
   local name="$1" dir target self
   check_name "$name"
-  dir="$(expand_tilde "${2:-$HOME/.local/bin}")"
+  expand_tilde "${2:-$HOME/.local/bin}"; dir="$EXPANDED"
   target="$dir/claude-$name"
   self="$(self_path)"
   mkdir -p "$dir"
   if [ -L "$target" ]; then
-    is_claude_as "$target" ||
-      die "$target already exists and is not a claude-as link; not touching it"
+    # Ours if it is claude-as, or a dead link to something named claude-as
+    # (e.g. after switching from the curl install to Homebrew).
+    case "$(readlink "$target")" in
+      */claude-as|claude-as) ;;
+      *) is_claude_as "$target" || die "$target already exists and is not a claude-as link; not touching it" ;;
+    esac
     ln -sfn "$self" "$target"
   elif [ -e "$target" ]; then
     die "$target already exists; not touching it"
@@ -352,12 +484,14 @@ cmd_link() {
     ln -s "$self" "$target"
   fi
   echo "$PROG: added claude-$name in $(short_path "$dir")"
+  is_default "$name" || profile_exists "$name" || warn "note: there is no profile '$name' yet (create it with: $PROG setup $name)"
   case ":$PATH:" in *":$dir:"*) ;; *) warn "note: $dir is not on your PATH" ;; esac
 }
 
 cmd_env() {
   [ $# -eq 1 ] || { echo "usage: $PROG env <profile>" >&2; exit 2; }
   check_name "$1"
+  require_profile "$1"
   activate "$1" >&2
   if [ -n "${CLAUDE_CONFIG_DIR+x}" ]; then
     printf 'export CLAUDE_CONFIG_DIR=%q\n' "$CLAUDE_CONFIG_DIR"
@@ -367,15 +501,16 @@ cmd_env() {
   printf 'export CLAUDE_AS_PROFILE=%q\n' "$1"
 }
 
-# find_session <session-id> <exclude-dir> — print "<config-dir>\t<transcript>"
-# for the first profile (default first) that has the session, other than the
-# excluded one.
+# find_session <session-id> <exclude-dir> — sets HIT_DIR and HIT_FILE to the
+# first profile (default first) other than the excluded one that has the
+# session's transcript.
 find_session() {
-  local sid="$1" skip="$2" d f
-  for d in "$BASE" $(for p in $(all_profiles); do profile_dir "$p"; done); do
-    [ "$d" = "$skip" ] && continue
-    for f in "$d"/projects/*/"$sid".jsonl "$d"/projects/*/sessions/"$sid".jsonl; do
-      [ -f "$f" ] && { printf '%s\t%s\n' "$d" "$f"; return 0; }
+  local sid="$1" skip="$2" p f
+  for p in default $(all_profiles); do
+    profile_paths "$p"
+    [ "$PDIR" = "$skip" ] && continue
+    for f in "$PDIR"/projects/*/"$sid".jsonl "$PDIR"/projects/*/sessions/"$sid".jsonl; do
+      [ -f "$f" ] && { HIT_DIR="$PDIR"; HIT_FILE="$f"; return 0; }
     done
   done
   return 1
@@ -383,45 +518,52 @@ find_session() {
 
 cmd_import() {
   [ $# -eq 2 ] || { echo "usage: $PROG import <profile> <session-id>" >&2; exit 2; }
-  local name="$1" sid="$2" dir hit src_dir src rel dest
+  local name="$1" sid="$2" dir rel dest
   check_name "$name"
   [[ "$sid" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || { echo "$PROG: '$sid' does not look like a session id" >&2; exit 2; }
-  is_default "$name" || setup_profile "$name"
-  dir="$(profile_dir "$name")"
-  hit="$(find_session "$sid" "$dir")" || die "no other profile has a session '$sid'"
-  src_dir="${hit%%$'\t'*}"; src="${hit#*$'\t'}"
-  rel="${src#"$src_dir"/}"                     # projects/<slug>/[sessions/]<sid>.jsonl
+  require_profile "$name"
+  if is_default "$name"; then profile_paths "$name"; else setup_profile "$name"; fi
+  dir="$PDIR"
+  find_session "$sid" "$dir" || die "no other profile has a session '$sid'"
+  rel="${HIT_FILE#"$HIT_DIR"/}"                # projects/<slug>/[sessions/]<sid>.jsonl
   dest="$dir/$rel"
   if [ -e "$dest" ]; then
     echo "$PROG: '$name' already has session $sid"
     return 0
   fi
-  mkdir -p "$(dirname "$dest")"
-  cp -p "$src" "$dest"
-  # Subagent transcripts and saved tool output live in a folder named after the session.
-  [ -d "${src%.jsonl}" ] && cp -Rp "${src%.jsonl}" "${dest%.jsonl}"
-  echo "$PROG: copied session $sid from $(short_path "$src_dir") into $(short_path "$dir")"
+  mkdir -p "${dest%/*}"
+  # Subagent transcripts and saved tool output live in a folder named after
+  # the session. Copy its contents first and the transcript last, via a temp
+  # file, so an interrupted import is simply redone next time.
+  if [ -d "${HIT_FILE%.jsonl}" ]; then
+    mkdir -p "${dest%.jsonl}"
+    cp -Rp "${HIT_FILE%.jsonl}/." "${dest%.jsonl}/"
+  fi
+  cp -p "$HIT_FILE" "$dest.tmp.$$"
+  mv "$dest.tmp.$$" "$dest"
+  echo "$PROG: copied session $sid from $(short_path "$HIT_DIR") into $(short_path "$dir")"
   echo "$PROG: resume it from the same folder with:  $PROG $name --resume $sid"
 }
 
 cmd_sync() {
   [ $# -eq 1 ] || { echo "usage: $PROG sync <profile>" >&2; exit 2; }
-  local name="$1" src dst tmp before after
+  local name="$1" dst tmp before after
   check_name "$name"
   is_default "$name" && die "'$name' is the default profile; sync copies from it into another profile"
   have_jq || die "sync needs jq"
+  require_profile "$name"
   setup_profile "$name"
-  src="$(base_account_file)"; dst="$(account_file "$name")"
-  [ -f "$src" ] || die "no default account file at $src"
-  [ -f "$dst" ] || echo '{}' > "$dst"
+  dst="$AFILE"
+  [ -f "$BASE_ACCOUNT" ] || die "no default account file at $BASE_ACCOUNT"
+  [ -f "$dst" ] || (umask 077; echo '{}' > "$dst")
   before="$("$JQ" '(.mcpServers // {}) | length' "$dst")"
   tmp="$dst.tmp.$$"
   # Profile values win on conflict: sync only adds what the profile lacks.
   (umask 077
-   "$JQ" --slurpfile b "$src" '
+   "$JQ" --slurpfile b "$BASE_ACCOUNT" '
      .mcpServers = (($b[0].mcpServers // {}) * (.mcpServers // {}))
      | .projects = (($b[0].projects // {}) * (.projects // {}))' "$dst" > "$tmp") ||
-    { rm -f "$tmp"; die "could not merge $src into $dst"; }
+    { rm -f "$tmp"; die "could not merge $BASE_ACCOUNT into $dst"; }
   mv "$tmp" "$dst"
   after="$("$JQ" '(.mcpServers // {}) | length' "$dst")"
   echo "$PROG: synced '$name' from the default profile: user-scope MCP servers $before -> $after; project settings merged"
@@ -433,21 +575,22 @@ cmd_sync() {
 # dropped, directories both have are merged recursively, and real conflicts
 # stay in src. Prints the number of conflicts left behind.
 merge_into() {
-  local src="$1" dst="$2" e name left=0 sub
+  local src="$1" dst="$2" e name t left=0 sub
   for e in "$src"/* "$src"/.[!.]* "$src"/..?*; do
     [ -e "$e" ] || [ -L "$e" ] || continue
-    name="${e##*/}"
-    if [ ! -e "$dst/$name" ] && [ ! -L "$dst/$name" ]; then
-      mv "$e" "$dst/$name"
-    elif [ -d "$e" ] && [ ! -L "$e" ] && [ -d "$dst/$name" ] && [ ! -L "$dst/$name" ]; then
-      sub="$(merge_into "$e" "$dst/$name")"
+    name="${e##*/}"; t="$dst/$name"
+    if [ ! -e "$t" ] && [ ! -L "$t" ]; then
+      mv -n "$e" "$t" 2>/dev/null || true          # -n: never overwrite, even in a race
+    elif [ -d "$e" ] && [ ! -L "$e" ] && [ -d "$t" ] && [ ! -L "$t" ]; then
+      sub="$(merge_into "$e" "$t")"
       left=$((left + sub))
       rmdir "$e" 2>/dev/null || true
-    elif [ -f "$e" ] && [ ! -L "$e" ] && [ -f "$dst/$name" ] && cmp -s "$e" "$dst/$name"; then
-      rm "$e"
-    else
-      left=$((left + 1))
+      continue
+    elif [ -f "$e" ] && [ ! -L "$e" ] && [ -f "$t" ] && [ ! -L "$t" ] && cmp -s "$e" "$t"; then
+      rm -f "$e" 2>/dev/null || true               # -f: no prompt for read-only files
     fi
+    # Whatever is still here (a conflict, or a move that failed) is left behind.
+    if [ -e "$e" ] || [ -L "$e" ]; then left=$((left + 1)); fi
   done
   echo "$left"
 }
@@ -457,45 +600,61 @@ merge_into() {
 # whatever conflicts in a stray copy next to the link, and relink.
 fix_drift() {
   local b="$1" p="$2" n="${2##*/}" stray left
+  if overlaps "$p" "$b"; then
+    echo "  SKIPPED  $n: $p and $b are the same place; not touching either"
+    return 1
+  fi
   stray="$p.claude-as-stray.$(date +%Y%m%d%H%M%S)"
-  if [ -d "$p" ] && [ -d "$b" ]; then
+  if [ -d "$p" ] && [ ! -L "$p" ] && [ -d "$b" ]; then
     left="$(merge_into "$p" "$b")"
     if rmdir "$p" 2>/dev/null; then
-      ln -s "$b" "$p"
+      ln -sn "$b" "$p" || { echo "  FAILED   $n: merged into $b but could not link it"; return 1; }
       echo "  fixed    $n: merged the profile's copy into $b and linked"
       return 0
     fi
-    mv "$p" "$stray"; ln -s "$b" "$p"
-    echo "  fixed    $n: merged into $b and linked; $left conflicting entr$( [ "$left" = 1 ] && echo y || echo ies) kept in $stray"
+    { mv "$p" "$stray" && ln -sn "$b" "$p"; } ||
+      { echo "  FAILED   $n: could not set the $left unmerged entries aside"; return 1; }
+    echo "  fixed    $n: merged into $b and linked; kept $left differing entr$( [ "$left" = 1 ] && echo y || echo ies) in $stray"
   elif [ -f "$p" ] && [ -f "$b" ] && cmp -s "$p" "$b"; then
-    rm "$p"; ln -s "$b" "$p"
+    { rm -f "$p" && ln -sn "$b" "$p"; } || { echo "  FAILED   $n: could not replace it with a link"; return 1; }
     echo "  fixed    $n: identical to the shared copy; linked"
   else
-    mv "$p" "$stray"; ln -s "$b" "$p"
+    { mv "$p" "$stray" && ln -sn "$b" "$p"; } || { echo "  FAILED   $n: could not set it aside and link"; return 1; }
     echo "  fixed    $n: linked; the profile's own copy is at $stray (diff it against $b)"
   fi
 }
 
 doctor_profile() {
-  local name="$1" fix="$2" dir n state problems=0
-  dir="$(profile_dir "$name")"
-  echo "profile $name  ($(short_path "$dir"))  account: $(account_label "$(account_file "$name")")"
-  for n in $(share_list); do
-    state="$(item_state "$BASE/$n" "$dir/$n")"
-    case "$state" in
+  local name="$1" fix="$2" dir n problems=0
+  profile_paths "$name"; dir="$PDIR"
+  echo "profile $name  ($(short_path "$dir"))  account: $(account_label "$AFILE")"
+  if overlaps "$dir" "$BASE"; then
+    echo "  SKIPPED  this profile's folder is the base directory $BASE; check default_aliases and base_dir"
+    return 1
+  fi
+  for n in $SHARE; do
+    item_state "$BASE/$n" "$dir/$n"
+    case "$STATE" in
       ok|absent) continue ;;
       missing)
-        if [ "$fix" = 1 ]; then ln -s "$(resolve_link "$BASE/$n")" "$dir/$n"; echo "  fixed    $n: linked"
-        else echo "  missing  $n: not linked yet"; problems=$((problems + 1)); fi ;;
+        if [ "$fix" = 0 ]; then echo "  missing  $n: not linked yet"; problems=$((problems + 1)); continue; fi
+        resolve_link "$BASE/$n"
+        if ln -sn "$RESOLVED" "$dir/$n" 2>/dev/null || [ -L "$dir/$n" ]; then echo "  fixed    $n: linked"
+        else echo "  FAILED   $n: could not link it"; problems=$((problems + 1)); fi ;;
       foreign)
-        if [ "$fix" = 1 ]; then ln -sfn "$(resolve_link "$BASE/$n")" "$dir/$n"; echo "  fixed    $n: re-pointed at $BASE/$n"
-        else echo "  foreign  $n: links to $(readlink "$dir/$n"), not $BASE/$n"; problems=$((problems + 1)); fi ;;
+        if [ "$fix" = 0 ]; then echo "  foreign  $n: links to $(readlink "$dir/$n"), not $BASE/$n"; problems=$((problems + 1)); continue; fi
+        resolve_link "$BASE/$n"
+        if ln -sfn "$RESOLVED" "$dir/$n"; then echo "  fixed    $n: re-pointed at $BASE/$n"
+        else echo "  FAILED   $n: could not re-point it"; problems=$((problems + 1)); fi ;;
       local)
-        if [ "$fix" = 1 ]; then mv "$dir/$n" "$BASE/$n"; ln -s "$BASE/$n" "$dir/$n"; echo "  fixed    $n: moved into $BASE and linked"
-        else echo "  local    $n: only this profile has one (--fix moves it into $BASE to share it)"; problems=$((problems + 1)); fi ;;
+        if [ "$fix" = 0 ]; then echo "  local    $n: only this profile has one (--fix moves it into $BASE to share it)"; problems=$((problems + 1)); continue; fi
+        if mv -n "$dir/$n" "$BASE/$n" 2>/dev/null && [ ! -e "$dir/$n" ] && ln -sn "$BASE/$n" "$dir/$n"; then
+          echo "  fixed    $n: moved into $BASE and linked"
+        else echo "  FAILED   $n: could not move it into $BASE"; problems=$((problems + 1)); fi ;;
       drift)
-        if [ "$fix" = 1 ]; then fix_drift "$(resolve_link "$BASE/$n")" "$dir/$n"
-        else echo "  drift    $n: the profile has its own copy instead of the shared one (--fix merges it in)"; problems=$((problems + 1)); fi ;;
+        if [ "$fix" = 0 ]; then echo "  drift    $n: the profile has its own copy instead of the shared one (--fix merges it in)"; problems=$((problems + 1)); continue; fi
+        resolve_link "$BASE/$n"
+        fix_drift "$RESOLVED" "$dir/$n" || problems=$((problems + 1)) ;;
     esac
   done
   [ "$problems" -eq 0 ] && [ "$fix" = 0 ] && echo "  ok: all shared items linked"
@@ -507,19 +666,17 @@ doctor_profile() {
 # the undocumented variable that relocates credential storage.
 auth_overrides() {
   local v keys
-  for v in CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY CLAUDE_SECURESTORAGE_CONFIG_DIR CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX; do
-    if [ -n "$(printenv "$v" 2>/dev/null || true)" ]; then
-      echo "warning    $v is set in your environment; it applies to every profile and overrides their own logins"
-    fi
+  for v in CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_PROFILE CLAUDE_SECURESTORAGE_CONFIG_DIR CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY; do
+    [ -z "${!v:-}" ] || echo "warning    $v is set in your environment; it applies to every profile and overrides their own logins"
   done
   if have_jq && [ -f "$BASE/settings.json" ]; then
-    keys="$("$JQ" -r '[(.env // {} | keys[] | select(test("^(ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|CLAUDE_CODE_OAUTH_TOKEN|CLAUDE_CODE_USE_BEDROCK|CLAUDE_CODE_USE_VERTEX)$"))), (if .apiKeyHelper then "apiKeyHelper" else empty end)] | join(", ")' "$BASE/settings.json" 2>/dev/null || true)"
+    keys="$("$JQ" -r '[(.env // {} | keys[] | select(test("^(ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_PROFILE|CLAUDE_CODE_OAUTH_TOKEN|CLAUDE_CODE_USE_BEDROCK|CLAUDE_CODE_USE_VERTEX|CLAUDE_CODE_USE_FOUNDRY)$"))), (if .apiKeyHelper then "apiKeyHelper" else empty end)] | join(", ")' "$BASE/settings.json" 2>/dev/null || true)"
     [ -z "$keys" ] || echo "warning    the shared settings.json sets $keys; that applies to every profile and overrides their own logins"
   fi
 }
 
 cmd_doctor() {
-  local fix=0 only="" a claude total=0 p rc
+  local fix=0 only="" a total=0 p rc profiles
   for a in "$@"; do
     case "$a" in
       --fix) fix=1 ;;
@@ -527,15 +684,20 @@ cmd_doctor() {
       *) [ -z "$only" ] || { echo "usage: $PROG doctor [profile] [--fix]" >&2; exit 2; }; check_name "$a"; only="$a" ;;
     esac
   done
-  echo "claude-as $CLAUDE_AS_VERSION"
-  if claude="$(find_claude 2>/dev/null)"; then echo "claude     $claude"
+  echo "claude-as  $CLAUDE_AS_VERSION"
+  if find_claude 2>/dev/null; then echo "claude     $CLAUDE_BIN"
   else echo "claude     NOT FOUND (set claude_bin or CLAUDE_AS_BIN)"; total=$((total + 1)); fi
   if have_jq; then echo "jq         $(command -v "$JQ")"; else echo "jq         not found (needed for seeding, sync and list)"; fi
   echo "base       $BASE"
   if [ -f "$CONFIG_FILE" ]; then echo "config     $CONFIG_FILE"; else echo "config     (none; defaults in use)"; fi
+  # A CLAUDE_CONFIG_DIR exported by the user's shell (not by claude-as).
   if [ -n "${CLAUDE_CONFIG_DIR:-}" ] && [ -z "${CLAUDE_AS_PROFILE:-}" ]; then
     case "${CLAUDE_CONFIG_DIR%/}" in
-      "$STOCK_BASE"|"~/.claude") echo "warning    CLAUDE_CONFIG_DIR is set to ~/.claude in your shell; plain claude will look logged out. Unset it."; total=$((total + 1)) ;;
+      "$STOCK_BASE"|"~/.claude")
+        echo "warning    CLAUDE_CONFIG_DIR is set to ~/.claude in your shell; plain claude will look logged out. Unset it."
+        total=$((total + 1)) ;;
+      "$BASE") ;;
+      *) echo "note       your shell sets CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR; claude-as replaces it for every profile. If that is your main setup, set base_dir to it in the config file." ;;
     esac
   fi
   auth_overrides
@@ -545,10 +707,11 @@ cmd_doctor() {
     profile_exists "$only" || die "no profile '$only' (create it with: $PROG setup $only)"
     rc=0; doctor_profile "$only" "$fix" || rc=$?; total=$((total + rc))
   else
-    for p in $(all_profiles); do
+    profiles="$(all_profiles)"
+    for p in $profiles; do
       rc=0; doctor_profile "$p" "$fix" || rc=$?; total=$((total + rc))
     done
-    [ -n "$(all_profiles)" ] || echo "no profiles yet (create one with: $PROG <name>)"
+    [ -n "$profiles" ] || echo "no profiles yet (create one with: $PROG <name>)"
   fi
   [ "$total" -eq 0 ] || { echo; echo "$total problem(s)"; return 1; }
 }
@@ -556,8 +719,7 @@ cmd_doctor() {
 # --- dispatch -----------------------------------------------------------------
 
 main() {
-  local self
-  self="$(basename "$0")"
+  local self="${0##*/}"
   # Invoked as claude-<profile> through a link: every argument goes to claude.
   case "$self" in
     claude-as|claude-as.sh) ;;

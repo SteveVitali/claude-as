@@ -8,7 +8,7 @@ Output docs/demo.gif
 Set Shell bash
 Set FontSize 15
 Set Width 1100
-Set Height 500
+Set Height 560
 Set Padding 16
 Set Theme "Catppuccin Mocha"
 Set TypingSpeed 40ms
@@ -23,23 +23,23 @@ Type "claude-as list"
 Enter
 Sleep 2s
 
-Type "claude-as alt auth login"
+Type "claude-as setup acme"
 Enter
 Sleep 2s
 
-Type "claude-as alt2 auth login"
+Type "claude-as acme auth login"
 Enter
 Sleep 2s
 
-Type "claude-as link alt"
+Type "claude-as setup lab && claude-as lab auth login"
 Enter
-Sleep 1.5s
+Sleep 2.5s
 
 Type "claude-as list"
 Enter
 Sleep 3s
 
-Type "ls ~/.claude-alt2/skills    # shared with ~/.claude"
+Type "ls ~/.claude-lab/skills    # shared with ~/.claude"
 Enter
 Sleep 2s
 

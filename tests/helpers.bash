@@ -5,7 +5,8 @@
 # suite with macOS's /bin/bash 3.2).
 
 setup_isolated_env() {
-  TESTTMP="$(mktemp -d "${TMPDIR:-/tmp}/claude-as-test.XXXXXX")"
+  # The space in the name makes every test run with a HOME containing a space.
+  TESTTMP="$(mktemp -d "${TMPDIR:-/tmp}/claude as test.XXXXXX")"
   # Resolve /var -> /private/var on macOS so path comparisons are exact.
   TESTTMP="$(cd "$TESTTMP" && pwd -P)"
   export TESTTMP

@@ -18,7 +18,7 @@ f="${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"
 [ -n "${CLAUDE_CONFIG_DIR:-}" ] || f="$HOME/.claude.json"
 case "$1 $2" in
   "auth login")
-    case "${CLAUDE_AS_PROFILE:-}" in alt) email="me@example.org" ;; *) email="me@example.net" ;; esac
+    email="me@${CLAUDE_AS_PROFILE:-default}.example"
     jq --arg e "$email" '.oauthAccount = {emailAddress: $e}' "$f" > "$f.t" && mv "$f.t" "$f"
     echo "Login successful." ;;
   "auth status")
@@ -30,7 +30,6 @@ chmod +x "$DEMO/bin/claude" "$DEMO/bin/claude-as"
 
 echo '{"model": "opus"}' > "$DEMO/home/.claude/settings.json"
 echo '{"hasCompletedOnboarding": true, "oauthAccount": {"emailAddress": "me@example.com"}}' > "$DEMO/home/.claude.json"
-echo 'default_aliases = main' > "$DEMO/home/.config/claude-as/config"
 
 export HOME="$DEMO/home"
 export PATH="$DEMO/bin:$HOME/.local/bin:$PATH"

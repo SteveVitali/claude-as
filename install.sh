@@ -5,18 +5,24 @@
 # Installs one self-contained bash script; nothing else.
 set -eu
 
-REPO_RAW="${CLAUDE_AS_RAW_URL:-https://raw.githubusercontent.com/SteveVitali/claude-as/main}"
+# The latest release's script (a release asset), so curl installs match Homebrew.
+SCRIPT_URL="${CLAUDE_AS_URL:-https://github.com/SteveVitali/claude-as/releases/latest/download/claude-as}"
 PREFIX="${CLAUDE_AS_PREFIX:-$HOME/.local/bin}"
 TARGET="$PREFIX/claude-as"
 
 mkdir -p "$PREFIX"
 
-script_dir=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || script_dir=""
+# Run as ./install.sh from a clone: install that checkout. Piped into bash,
+# $0 is "bash", so never pick up a bin/claude-as from the current directory.
+script_dir=""
+case "$0" in
+  */install.sh|install.sh) script_dir=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || script_dir="" ;;
+esac
 if [ -n "$script_dir" ] && [ -f "$script_dir/bin/claude-as" ]; then
   cp "$script_dir/bin/claude-as" "$TARGET.tmp.$$"
 else
   echo "Downloading claude-as..."
-  curl -fsSL "$REPO_RAW/bin/claude-as" -o "$TARGET.tmp.$$"
+  curl -fsSL "$SCRIPT_URL" -o "$TARGET.tmp.$$"
 fi
 chmod +x "$TARGET.tmp.$$"
 mv "$TARGET.tmp.$$" "$TARGET"
@@ -35,11 +41,12 @@ esac
 if ! command -v jq >/dev/null 2>&1; then
   echo ""
   echo "NOTE: jq was not found. claude-as works without it, but new profiles will"
-  echo "not inherit your onboarding/project trust/MCP servers, and 'sync' needs it."
+  echo "start without your onboarding, project trust and MCP servers, and 'sync' needs it."
 fi
 
 echo ""
 echo "Next steps:"
-echo "  claude-as alt auth login    # create an 'alt' profile and sign in"
-echo "  claude-as link alt          # optional: adds a 'claude-alt' command"
+echo "  claude-as setup acme         # create a profile for another account"
+echo "  claude-as acme auth login    # sign in to it"
+echo "  claude-as link acme          # optional: adds a 'claude-acme' command"
 echo "  claude-as list"

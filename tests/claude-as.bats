@@ -12,7 +12,7 @@ teardown() { teardown_isolated_env; }
 @test "no arguments prints usage and exits 2" {
   run ca
   [ "$status" -eq 2 ]
-  [[ "$output" == *"Usage:"* ]]
+  [[ "$output" == *"Usage:"* ]] || false
 }
 
 @test "help and --help exit 0" {
@@ -23,7 +23,7 @@ teardown() { teardown_isolated_env; }
 @test "--version prints semver" {
   run ca --version
   [ "$status" -eq 0 ]
-  [[ "$output" =~ ^claude-as\ [0-9]+\.[0-9]+\.[0-9]+$ ]]
+  [[ "$output" =~ ^claude-as\ [0-9]+\.[0-9]+\.[0-9]+$ ]] || false
 }
 
 @test "unknown option exits 2" {
@@ -44,49 +44,51 @@ teardown() { teardown_isolated_env; }
 @test "default profile runs claude with CLAUDE_CONFIG_DIR unset, even if inherited" {
   CLAUDE_CONFIG_DIR="$HOME/.claude-other" run ca default --resume abc
   [ "$status" -eq 0 ]
-  [[ "$output" == *"CONFIG_DIR=<unset>"* ]]
-  [[ "$output" == *"PROFILE=default"* ]]
-  [[ "$output" == *"ARGS=--resume abc"* ]]
+  [[ "$output" == *"CONFIG_DIR=<unset>"* ]] || false
+  [[ "$output" == *"PROFILE=default"* ]] || false
+  [[ "$output" == *"ARGS=--resume abc"* ]] || false
 }
 
 @test "default_aliases names the default profile" {
   write_config "default_aliases = personal, me"
   run ca personal
   [ "$status" -eq 0 ]
-  [[ "$output" == *"CONFIG_DIR=<unset>"* ]]
-  [[ "$output" == *"PROFILE=personal"* ]]
+  [[ "$output" == *"CONFIG_DIR=<unset>"* ]] || false
+  [[ "$output" == *"PROFILE=personal"* ]] || false
   [ ! -e "$HOME/.claude-personal" ]
 }
 
 @test "a named profile runs claude with its own CLAUDE_CONFIG_DIR" {
+  ca setup work
   run ca work -p "hello world"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"CONFIG_DIR=$HOME/.claude-work"* ]]
-  [[ "$output" == *"PROFILE=work"* ]]
-  [[ "$output" == *"ARGS=-p hello world"* ]]
+  [[ "$output" == *"CONFIG_DIR=$HOME/.claude-work"* ]] || false
+  [[ "$output" == *"PROFILE=work"* ]] || false
+  [[ "$output" == *"ARGS=-p hello world"* ]] || false
 }
 
 @test "missing claude binary exits 127" {
   rm "$TESTTMP/fakebin/claude"
   PATH="$TESTTMP/fakebin:/usr/bin:/bin" run -127 ca work
   [ "$status" -eq 127 ]
-  [[ "$output" == *"not found"* ]]
+  [[ "$output" == *"not found"* ]] || false
 }
 
 @test "CLAUDE_AS_BIN and claude_bin choose the binary" {
   mkdir -p "$TESTTMP/alt"
   printf '#!/bin/sh\necho ALT\n' > "$TESTTMP/alt/claude"; chmod +x "$TESTTMP/alt/claude"
+  ca setup work
   CLAUDE_AS_BIN="$TESTTMP/alt/claude" run ca work
   [ "$output" = ALT ] || [[ "$output" == *ALT ]]
   write_config "claude_bin = $TESTTMP/alt/claude"
   run ca work
-  [[ "$output" == *ALT ]]
+  [[ "$output" == *ALT ]] || false
 }
 
 @test "refuses to exec itself as claude" {
   CLAUDE_AS_BIN="$SCRIPT" run -127 ca work
   [ "$status" -eq 127 ]
-  [[ "$output" == *"is claude-as itself"* ]]
+  [[ "$output" == *"is claude-as itself"* ]] || false
 }
 
 # --- profile setup -----------------------------------------------------------------
@@ -99,13 +101,13 @@ teardown() { teardown_isolated_env; }
     assert_link "$d/$n" "$HOME/.claude/$n"
   done
   # Transcripts/memory and plans stay per profile by default (claude-code#98044).
-  [ ! -L "$d/projects" ] && [ ! -L "$d/plans" ]
+  [ ! -L "$d/projects" ] && [ ! -L "$d/plans" ] || false
   [ -f "$d/.claude-as" ]
   # Shared dirs are created in the base so later additions are shared too.
-  [ -d "$HOME/.claude/agents" ] && [ -d "$HOME/.claude/file-history" ]
+  [ -d "$HOME/.claude/agents" ] && [ -d "$HOME/.claude/file-history" ] || false
   [ -f "$HOME/.claude/history.jsonl" ]
   # Optional items that do not exist are not linked.
-  [ ! -e "$d/keybindings.json" ] && [ ! -L "$d/keybindings.json" ]
+  [ ! -e "$d/keybindings.json" ] && [ ! -L "$d/keybindings.json" ] || false
   [ ! -L "$d/hooks" ]
 }
 
@@ -147,7 +149,7 @@ teardown() { teardown_isolated_env; }
 @test "without jq, setup still works and skips seeding" {
   CLAUDE_AS_JQ=/nonexistent/jq run ca setup work
   [ "$status" -eq 0 ]
-  [[ "$output" == *"jq not found"* ]]
+  [[ "$output" == *"jq not found"* ]] || false
   [ ! -e "$HOME/.claude-work/.claude.json" ]
   assert_link "$HOME/.claude-work/settings.json" "$HOME/.claude/settings.json"
 }
@@ -157,7 +159,7 @@ teardown() { teardown_isolated_env; }
   echo '{"model":"local"}' > "$HOME/.claude-work/settings.json"
   run ca setup work
   [ "$status" -eq 0 ]
-  [[ "$output" == *"own copy, not the shared one"* ]]
+  [[ "$output" == *"own copy, not the shared one"* ]] || false
   [ ! -L "$HOME/.claude-work/settings.json" ]
   grep -q local "$HOME/.claude-work/settings.json"
 }
@@ -166,8 +168,8 @@ teardown() { teardown_isolated_env; }
   ca setup work
   run ca setup work
   [ "$status" -eq 0 ]
-  [[ "$output" != *"own copy"* ]]
-  [[ "$output" != *"created profile"* ]]
+  [[ "$output" != *"own copy"* ]] || false
+  [[ "$output" != *"created profile"* ]] || false
 }
 
 @test "share_add and share_skip adjust what is shared" {
@@ -175,7 +177,7 @@ teardown() { teardown_isolated_env; }
   write_config "share_add = statusline.sh" "share_skip = history.jsonl, todos"
   ca setup work
   assert_link "$HOME/.claude-work/statusline.sh" "$HOME/.claude/statusline.sh"
-  [ ! -e "$HOME/.claude-work/history.jsonl" ] && [ ! -L "$HOME/.claude-work/history.jsonl" ]
+  [ ! -e "$HOME/.claude-work/history.jsonl" ] && [ ! -L "$HOME/.claude-work/history.jsonl" ] || false
   [ ! -L "$HOME/.claude-work/todos" ]
 }
 
@@ -190,8 +192,8 @@ teardown() { teardown_isolated_env; }
   write_config "share_add = .claude.json .credentials.json ../evil a/b"
   run ca setup work
   [ "$status" -eq 0 ]
-  [[ "$output" == *"ignoring share entry '.claude.json'"* ]]
-  [[ "$output" == *"ignoring share entry '.credentials.json'"* ]]
+  [[ "$output" == *"ignoring share entry '.claude.json'"* ]] || false
+  [[ "$output" == *"ignoring share entry '.credentials.json'"* ]] || false
   [ ! -L "$HOME/.claude-work/.claude.json" ]
   [ ! -L "$HOME/.claude-work/.credentials.json" ]
 }
@@ -199,7 +201,7 @@ teardown() { teardown_isolated_env; }
 @test "setup of the default profile is a no-op" {
   run ca setup default
   [ "$status" -eq 0 ]
-  [[ "$output" == *"default profile"* ]]
+  [[ "$output" == *"default profile"* ]] || false
 }
 
 @test "custom base_dir exports CLAUDE_CONFIG_DIR for the default profile" {
@@ -207,7 +209,7 @@ teardown() { teardown_isolated_env; }
   echo '{}' > "$TESTTMP/base/settings.json"
   write_config "base_dir = $TESTTMP/base"
   run ca default
-  [[ "$output" == *"CONFIG_DIR=$TESTTMP/base"* ]]
+  [[ "$output" == *"CONFIG_DIR=$TESTTMP/base"* ]] || false
   ca setup work
   assert_link "$HOME/.claude-work/settings.json" "$TESTTMP/base/settings.json"
 }
@@ -216,18 +218,19 @@ teardown() { teardown_isolated_env; }
   rm -rf "$HOME/.claude"
   run ca setup work
   [ "$status" -ne 0 ]
-  [[ "$output" == *"does not exist"* ]]
+  [[ "$output" == *"does not exist"* ]] || false
 }
 
 # --- claude-<profile> links ----------------------------------------------------------
 
 @test "link creates claude-<profile> that runs as that profile with all args passed" {
+  ca setup work
   run ca link work "$TESTTMP/linkbin"
   [ "$status" -eq 0 ]
   [ -L "$TESTTMP/linkbin/claude-work" ]
   run "$TEST_BASH" "$TESTTMP/linkbin/claude-work" list --flag
-  [[ "$output" == *"CONFIG_DIR=$HOME/.claude-work"* ]]
-  [[ "$output" == *"ARGS=list --flag"* ]]
+  [[ "$output" == *"CONFIG_DIR=$HOME/.claude-work"* ]] || false
+  [[ "$output" == *"ARGS=list --flag"* ]] || false
 }
 
 @test "link refuses to replace an unrelated file" {
@@ -239,10 +242,11 @@ teardown() { teardown_isolated_env; }
 }
 
 @test "link defaults to ~/.local/bin and warns when it is not on PATH" {
+  ca setup work
   run ca link work
   [ "$status" -eq 0 ]
   [ -L "$HOME/.local/bin/claude-work" ]
-  [[ "$output" == *"not on your PATH"* ]]
+  [[ "$output" == *"not on your PATH"* ]] || false
 }
 
 # --- list / env / sync -------------------------------------------------------------
@@ -255,19 +259,20 @@ teardown() { teardown_isolated_env; }
   mkdir -p "$HOME/.claude-code-router"
   CLAUDE_AS_PROFILE=work run ca list
   [ "$status" -eq 0 ]
-  [[ "$output" == *"default"*"me@example.com"* ]]
-  [[ "$output" == *"* work"*"work@example.com"* ]]
-  [[ "$output" == *"fresh"*"(not logged in)"* ]]
-  [[ "$output" != *"code-router"* ]]
+  [[ "$output" == *"default"*"me@example.com"* ]] || false
+  [[ "$output" == *"* work"*"work@example.com"* ]] || false
+  [[ "$output" == *"fresh"*"(not logged in)"* ]] || false
+  [[ "$output" != *"code-router"* ]] || false
 }
 
 @test "list falls back to sed without jq" {
   CLAUDE_AS_JQ=/nonexistent/jq run ca list
   [ "$status" -eq 0 ]
-  [[ "$output" == *"me@example.com"* ]]
+  [[ "$output" == *"me@example.com"* ]] || false
 }
 
 @test "env output can be eval'd" {
+  ca setup work
   eval "$(ca env work 2>/dev/null)"
   [ "$CLAUDE_CONFIG_DIR" = "$HOME/.claude-work" ]
   [ "$CLAUDE_AS_PROFILE" = work ]
@@ -303,7 +308,7 @@ teardown() { teardown_isolated_env; }
   ca setup work
   run ca doctor
   [ "$status" -eq 0 ]
-  [[ "$output" == *"ok: all shared items linked"* ]]
+  [[ "$output" == *"ok: all shared items linked"* ]] || false
 }
 
 @test "doctor detects a drifted file and --fix relinks, keeping the stray copy" {
@@ -312,7 +317,7 @@ teardown() { teardown_isolated_env; }
   echo '{"model":"drifted"}' > "$HOME/.claude-work/settings.json"
   run ca doctor work
   [ "$status" -eq 1 ]
-  [[ "$output" == *"drift    settings.json"* ]]
+  [[ "$output" == *"drift    settings.json"* ]] || false
   run ca doctor work --fix
   [ "$status" -eq 0 ]
   assert_link "$HOME/.claude-work/settings.json" "$HOME/.claude/settings.json"
@@ -326,7 +331,7 @@ teardown() { teardown_isolated_env; }
   echo '{"bindings":[]}' > "$HOME/.claude-work/keybindings.json"
   run ca doctor work
   [ "$status" -eq 1 ]
-  [[ "$output" == *"local    keybindings.json"* ]]
+  [[ "$output" == *"local    keybindings.json"* ]] || false
   ca doctor work --fix
   assert_link "$HOME/.claude-work/keybindings.json" "$HOME/.claude/keybindings.json"
   grep -q bindings "$HOME/.claude/keybindings.json"
@@ -338,8 +343,8 @@ teardown() { teardown_isolated_env; }
   ln -sfn /elsewhere "$HOME/.claude-work/agents"   # -n: replace the link, do not descend into it (GNU ln)
   run ca doctor work
   [ "$status" -eq 1 ]
-  [[ "$output" == *"missing  skills"* ]]
-  [[ "$output" == *"foreign  agents"* ]]
+  [[ "$output" == *"missing  skills"* ]] || false
+  [[ "$output" == *"foreign  agents"* ]] || false
   run ca doctor work --fix
   [ "$status" -eq 0 ]
   assert_link "$HOME/.claude-work/skills" "$HOME/.claude/skills"
@@ -349,7 +354,7 @@ teardown() { teardown_isolated_env; }
 @test "doctor warns when CLAUDE_CONFIG_DIR points at ~/.claude" {
   CLAUDE_CONFIG_DIR="$HOME/.claude" run ca doctor
   [ "$status" -eq 1 ]
-  [[ "$output" == *"plain claude will look logged out"* ]]
+  [[ "$output" == *"plain claude will look logged out"* ]] || false
 }
 
 @test "doctor on an unknown profile fails" {
@@ -364,7 +369,7 @@ teardown() { teardown_isolated_env; }
   run ca doctor work --fix
   [ "$status" -eq 0 ]
   assert_link "$HOME/.claude-work/settings.json" "$HOME/.claude/settings.json"
-  ! ls "$HOME/.claude-work"/settings.json.claude-as-stray.* 2>/dev/null
+  for f in "$HOME/.claude-work"/settings.json.claude-as-stray.*; do [ ! -e "$f" ]; done
 }
 
 @test "adopting an existing CLAUDE_CONFIG_DIR merges its directories into the shared ones" {
@@ -382,18 +387,18 @@ teardown() { teardown_isolated_env; }
   echo '{"oauthAccount":{"emailAddress":"work@example.com"}}' > "$w/.claude.json"
   run ca setup work
   [ "$status" -eq 0 ]
-  [[ "$output" == *"projects is the profile's own copy"* ]]
+  [[ "$output" == *"projects is the profile's own copy"* ]] || false
   run ca doctor work --fix
   [ "$status" -eq 0 ]
-  [[ "$output" == *"skills: merged the profile's copy"* ]]
-  [[ "$output" == *"projects: merged into"*"1 conflicting entry kept in"* ]]
+  [[ "$output" == *"skills: merged the profile's copy"* ]] || false
+  [[ "$output" == *"projects: merged into"*"kept 1 differing entry in"* ]] || false
   assert_link "$w/projects" "$b/projects"
   assert_link "$w/skills" "$b/skills"
   # Transcripts from both sides are now in the shared tree.
   [ "$(cat "$b/projects/-repo-a/s0.jsonl")" = old ]
   [ "$(cat "$b/projects/-repo-a/s1.jsonl")" = new ]
   [ "$(cat "$b/projects/-repo-z/s2.jsonl")" = z ]
-  [ -d "$b/skills/work-skill" ] && [ -d "$b/skills/my-skill" ]
+  [ -d "$b/skills/work-skill" ] && [ -d "$b/skills/my-skill" ] || false
   # The conflicting file kept its shared version; the profile's version is preserved.
   [ "$(cat "$b/projects/-repo-a/memory/MEMORY.md")" = base ]
   [ "$(cat "$w"/projects.claude-as-stray.*/-repo-a/memory/MEMORY.md)" = work ]
@@ -412,17 +417,18 @@ make_session() { # <config-dir> <slug> <sid>
 }
 
 @test "import copies a session (and its subagent folder) into another profile" {
+  ca setup work
   make_session "$HOME/.claude" -repo-a 11111111-aaaa
   run ca import work 11111111-aaaa
   [ "$status" -eq 0 ]
-  [[ "$output" == *"claude-as work --resume 11111111-aaaa"* ]]
+  [[ "$output" == *"claude-as work --resume 11111111-aaaa"* ]] || false
   [ -f "$HOME/.claude-work/projects/-repo-a/11111111-aaaa.jsonl" ]
   [ "$(cat "$HOME/.claude-work/projects/-repo-a/11111111-aaaa/subagents/agent-1.jsonl")" = sub ]
   # The original is left in place.
   [ -f "$HOME/.claude/projects/-repo-a/11111111-aaaa.jsonl" ]
   run ca import work 11111111-aaaa
   [ "$status" -eq 0 ]
-  [[ "$output" == *"already has session"* ]]
+  [[ "$output" == *"already has session"* ]] || false
 }
 
 @test "import works back into the default profile" {
@@ -434,9 +440,10 @@ make_session() { # <config-dir> <slug> <sid>
 }
 
 @test "import rejects unknown sessions and malformed ids" {
+  ca setup work
   run ca import work 99999999-none
   [ "$status" -ne 0 ]
-  [[ "$output" == *"no other profile has"* ]]
+  [[ "$output" == *"no other profile has"* ]] || false
   run ca import work '../../etc/passwd'
   [ "$status" -eq 2 ]
 }
@@ -454,18 +461,19 @@ make_session() { # <config-dir> <slug> <sid>
 }
 
 @test "a trailing slash in HOME does not change the profile path" {
+  ca setup work
   HOME="$HOME/" run ca work
-  [[ "$output" == *"CONFIG_DIR=$HOME/.claude-work"* ]]
-  [[ "$output" != *"//"* ]]
+  [[ "$output" == *"CONFIG_DIR=$HOME/.claude-work"* ]] || false
+  [[ "$output" != *"//"* ]] || false
 }
 
 @test "doctor warns about credentials that override every profile" {
   ca setup work
   CLAUDE_CODE_OAUTH_TOKEN=x run ca doctor
-  [[ "$output" == *"CLAUDE_CODE_OAUTH_TOKEN is set"* ]]
+  [[ "$output" == *"CLAUDE_CODE_OAUTH_TOKEN is set"* ]] || false
   echo '{"env":{"ANTHROPIC_API_KEY":"k"},"apiKeyHelper":"/bin/echo"}' > "$HOME/.claude/settings.json"
   run ca doctor
-  [[ "$output" == *"shared settings.json sets ANTHROPIC_API_KEY, apiKeyHelper"* ]]
+  [[ "$output" == *"shared settings.json sets ANTHROPIC_API_KEY, apiKeyHelper"* ]] || false
 }
 
 # --- many accounts ----------------------------------------------------------------
@@ -474,7 +482,7 @@ make_session() { # <config-dir> <slug> <sid>
   for p in a b c d; do ca setup "$p" >/dev/null 2>&1; done
   for p in a b c d; do
     run ca "$p"
-    [[ "$output" == *"CONFIG_DIR=$HOME/.claude-$p"* ]]
+    [[ "$output" == *"CONFIG_DIR=$HOME/.claude-$p"* ]] || false
     assert_link "$HOME/.claude-$p/settings.json" "$HOME/.claude/settings.json"
   done
   run ca list
@@ -489,6 +497,172 @@ make_session() { # <config-dir> <slug> <sid>
   make_session "$HOME/.claude-a" -repo-c 33333333-cccc
   run ca import b 33333333-cccc
   [ "$status" -eq 0 ]
-  [[ "$output" == *"from ~/.claude-a into ~/.claude-b"* ]]
+  [[ "$output" == *"from ~/.claude-a into ~/.claude-b"* ]] || false
   [ -f "$HOME/.claude-b/projects/-repo-c/33333333-cccc.jsonl" ]
 }
+
+# --- guarding against typos ---------------------------------------------------------
+
+@test "running a profile that does not exist fails without a terminal, and creates nothing" {
+  run ca acme2 -p hi < /dev/null
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"there is no profile 'acme2' (create it with: claude-as setup acme2)"* ]] || false
+  [ ! -e "$HOME/.claude-acme2" ]
+}
+
+@test "claude's own subcommands are not profile names" {
+  run ca auth login
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"'auth' is a claude command"*"claude-as <profile> auth"* ]] || false
+  run ca mcp list
+  [ "$status" -eq 2 ]
+  [ ! -e "$HOME/.claude-auth" ] && [ ! -e "$HOME/.claude-mcp" ] || false
+}
+
+@test "env, import and sync need an existing profile" {
+  run ca env nope;            [ "$status" -eq 1 ]
+  run ca import nope abc-123; [ "$status" -eq 1 ]
+  run ca sync nope;           [ "$status" -eq 1 ]
+  [ ! -e "$HOME/.claude-nope" ]
+}
+
+@test "link warns when the profile does not exist yet" {
+  run ca link later "$TESTTMP/linkbin"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"there is no profile 'later' yet"* ]] || false
+}
+
+# --- config parsing -------------------------------------------------------------------
+
+@test "list settings accumulate across lines; unknown keys and bad lines warn" {
+  echo x > "$HOME/.claude/a.txt"; echo y > "$HOME/.claude/b.txt"
+  write_config "share_add = a.txt" "share_add = b.txt" "  # a comment" "sharre_skip = todos" "nonsense"
+  run ca setup work
+  [ "$status" -eq 0 ]
+  assert_link "$HOME/.claude-work/a.txt" "$HOME/.claude/a.txt"
+  assert_link "$HOME/.claude-work/b.txt" "$HOME/.claude/b.txt"
+  [[ "$output" == *"unknown setting 'sharre_skip'"* ]] || false
+  [[ "$output" == *"expected 'key = value'"* ]] || false
+}
+
+@test "a glob in share_add stays literal and is rejected" {
+  touch "$HOME/.claude/zz-should-not-link"
+  write_config "share_add = * zz-*"
+  run ca setup work
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ignoring share entry '*'"* ]] || false
+  [ ! -L "$HOME/.claude-work/zz-should-not-link" ]
+}
+
+@test "list sizes its columns to the content" {
+  local a_name=a-much-longer-profile-name
+  ca setup "$a_name"
+  run ca list
+  [ "$status" -eq 0 ]
+  # Header and rows line up: ACCOUNT starts in the same column everywhere.
+  local hdr row hpre rpre
+  hdr="$(echo "$output" | sed -n 1p)"; row="$(echo "$output" | grep 'a-much-longer')"
+  hpre="${hdr%%ACCOUNT*}"; rpre="${row%%(not logged in)*}"
+  [ "${#hpre}" -eq "${#rpre}" ]
+  # ...and no wider than the longest name needs.
+  [ "${#hpre}" -eq $(( 2 + ${#a_name} + 3 )) ] || [ "${#hpre}" -eq 31 ]
+}
+
+# --- data safety (regressions from the pre-announcement review) ---------------------
+
+@test "doctor --fix never touches the base when an old profile name becomes a default alias" {
+  ca setup personal
+  write_config "default_aliases = personal"
+  run ca doctor --fix
+  # The stale profile is not treated as a profile at all, and ~/.claude is intact.
+  [[ "$output" != *"profile personal"* ]] || false
+  [ -f "$HOME/.claude/settings.json" ] && [ ! -L "$HOME/.claude/settings.json" ] || false
+  [ -d "$HOME/.claude/skills/my-skill" ] && [ ! -L "$HOME/.claude/skills" ] || false
+  grep -q opus "$HOME/.claude/settings.json"
+}
+
+@test "a profile whose folder is the base directory is refused" {
+  mkdir -p "$HOME/.claude-main"
+  echo '{"model":"opus"}' > "$HOME/.claude-main/settings.json"
+  write_config "base_dir = ~/.claude-main"
+  run ca setup main
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"is your base directory"* ]] || false
+  [ -f "$HOME/.claude-main/settings.json" ] && [ ! -L "$HOME/.claude-main/settings.json" ] || false
+}
+
+@test "doctor --fix refuses to merge a base item that links back into the profile" {
+  ca setup work
+  # ~/.claude/agents is a link into the profile's own agents folder.
+  rm "$HOME/.claude-work/agents"; mkdir "$HOME/.claude-work/agents"; echo keep > "$HOME/.claude-work/agents/a.md"
+  rmdir "$HOME/.claude/agents"; ln -s "$HOME/.claude-work/agents" "$HOME/.claude/agents"
+  run ca doctor work --fix
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"SKIPPED  agents"* ]] || false
+  [ "$(cat "$HOME/.claude-work/agents/a.md")" = keep ]
+}
+
+@test "concurrent first launches all start claude and never nest links in the base" {
+  ca setup race >/dev/null 2>&1; rm -rf "$HOME/.claude-race"; mkdir -p "$HOME/.claude-race"
+  echo "claude-as profile: race" > "$HOME/.claude-race/.claude-as"
+  local i
+  for i in 1 2 3 4 5 6; do ( ca race > "$TESTTMP/out.$i" 2>&1; echo $? > "$TESTTMP/rc.$i" ) & done
+  wait
+  for i in 1 2 3 4 5 6; do
+    [ "$(cat "$TESTTMP/rc.$i")" = 0 ] || { cat "$TESTTMP/out.$i"; false; }
+  done
+  for n in skills agents commands plugins todos file-history; do
+    [ ! -e "$HOME/.claude/$n/$n" ] && [ ! -L "$HOME/.claude/$n/$n" ] || false
+  done
+}
+
+@test "doctor --fix reports a failed move instead of claiming success" {
+  [ "$(id -u)" != 0 ] || skip "root ignores permissions"
+  ca setup work
+  mkdir -p "$HOME/.claude-work/hooks"; echo h > "$HOME/.claude-work/hooks/pre.sh"
+  chmod 555 "$HOME/.claude"
+  run ca doctor work --fix
+  chmod 755 "$HOME/.claude"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"FAILED   hooks"* ]] || false
+  [ -f "$HOME/.claude-work/hooks/pre.sh" ]
+  [ ! -L "$HOME/.claude-work/hooks/hooks" ]
+}
+
+@test "doctor --fix drops identical read-only files without prompting" {
+  ca setup work
+  rm "$HOME/.claude-work/plugins"; mkdir -p "$HOME/.claude-work/plugins/m" "$HOME/.claude/plugins/m"
+  echo pack > "$HOME/.claude/plugins/m/obj"; cp "$HOME/.claude/plugins/m/obj" "$HOME/.claude-work/plugins/m/obj"
+  chmod 444 "$HOME/.claude-work/plugins/m/obj"
+  run ca doctor work --fix < /dev/null
+  [ "$status" -eq 0 ]
+  assert_link "$HOME/.claude-work/plugins" "$HOME/.claude/plugins"
+}
+
+@test "import into a profile that already has the session folder does not nest it" {
+  ca setup work
+  make_session "$HOME/.claude" -repo-n 44444444-dddd
+  mkdir -p "$HOME/.claude-work/projects/-repo-n/44444444-dddd/subagents"   # e.g. an interrupted import
+  run ca import work 44444444-dddd
+  [ "$status" -eq 0 ]
+  [ -f "$HOME/.claude-work/projects/-repo-n/44444444-dddd/subagents/agent-1.jsonl" ]
+  [ ! -e "$HOME/.claude-work/projects/-repo-n/44444444-dddd/44444444-dddd" ]
+  [ -f "$HOME/.claude-work/projects/-repo-n/44444444-dddd.jsonl" ]
+}
+
+@test "a relative base_dir is rejected" {
+  write_config "base_dir = .claude-main"
+  run ca list
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"base_dir must be an absolute path"* ]] || false
+}
+
+@test "link replaces a dead link left by an earlier install" {
+  ca setup work
+  mkdir -p "$TESTTMP/linkbin"
+  ln -s "$TESTTMP/gone/bin/claude-as" "$TESTTMP/linkbin/claude-work"
+  run ca link work "$TESTTMP/linkbin"
+  [ "$status" -eq 0 ]
+  [ -e "$TESTTMP/linkbin/claude-work" ]
+}
+
