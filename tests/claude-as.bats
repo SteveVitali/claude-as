@@ -335,7 +335,7 @@ teardown() { teardown_isolated_env; }
 @test "doctor reports and fixes missing and foreign links" {
   ca setup work
   rm "$HOME/.claude-work/skills"
-  ln -s /elsewhere "$HOME/.claude-work/agents"
+  ln -sfn /elsewhere "$HOME/.claude-work/agents"   # -n: replace the link, do not descend into it (GNU ln)
   run ca doctor work
   [ "$status" -eq 1 ]
   [[ "$output" == *"missing  skills"* ]]
