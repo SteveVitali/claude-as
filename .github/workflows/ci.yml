@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck -x bin/claude-as install.sh tests/helpers.bash
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install bats and jq
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            brew install bats-core jq
+          else
+            sudo apt-get update -qq && sudo apt-get install -y -qq bats jq
+          fi
+      - name: Run tests
+        run: bats tests/
+      - name: Run tests under macOS bash 3.2
+        if: runner.os == 'macOS'
+        run: TEST_BASH=/bin/bash bats tests/
+
+  install-script:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install from the clone into a temp prefix
+        run: |
+          CLAUDE_AS_PREFIX="$RUNNER_TEMP/bin" ./install.sh
+          "$RUNNER_TEMP/bin/claude-as" --version

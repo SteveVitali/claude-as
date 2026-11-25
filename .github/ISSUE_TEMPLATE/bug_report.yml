@@ -1,0 +1,35 @@
+name: Bug report
+description: Something claude-as did that it should not have, or did not do
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. claude-as setup work
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `claude-as doctor`
+      description: Email addresses appear in this output; redact them if you like.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Output of `claude-as --version` and `claude --version`, plus your OS
+      placeholder: claude-as 0.1.0 · Claude Code 2.1.332 · macOS 14.4
+    validations:
+      required: true
