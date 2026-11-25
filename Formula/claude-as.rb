@@ -5,7 +5,7 @@ class ClaudeAs < Formula
   desc "Run Claude Code as multiple accounts at once, sharing config"
   homepage "https://github.com/SteveVitali/claude-as"
   url "https://github.com/SteveVitali/claude-as/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  sha256 "fd8f70020e90dc831e52dd6f2198247440be6f878a9d82cdec95d828fd8ac5df"
   license "MIT"
   head "https://github.com/SteveVitali/claude-as.git", branch: "main"
 
