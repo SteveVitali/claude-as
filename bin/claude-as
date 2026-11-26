@@ -17,7 +17,7 @@
 # shellcheck disable=SC2088,SC2016
 set -euo pipefail
 
-CLAUDE_AS_VERSION="0.3.0"
+CLAUDE_AS_VERSION="0.3.1"
 PROG="claude-as"
 
 die()  { echo "$PROG: $*" >&2; exit 1; }
@@ -412,6 +412,7 @@ cmd_run() {
   require_profile "$name" confirm
   activate "$name"
   if ! is_default "$name"; then
+    repair_plugin_paths
     hook_settings
     if [ -n "$HOOK_SETTINGS" ] && wants_hook "$@"; then
       exec "$CLAUDE_BIN" --settings "$HOOK_SETTINGS" "$@"
@@ -873,6 +874,26 @@ plugin_paths() {
     rm -f "$tmp" "$f.orig.$$"
   done
   return "$rc"
+}
+
+# repair_plugin_paths — run at launch. A plugin installed or updated by a
+# profile's earlier session records its path under that profile; rewrite it to
+# the base (the same files, through the plugins/ link) so that removing the
+# profile later can't orphan it. A stamp file keeps this to two stat calls
+# unless a plugin file has changed since the last check (bash 3.2 reads files a
+# byte at a time, so reading them on every launch is too slow). The stamp is
+# written before the check, so a change made after it is seen next time; the
+# check runs on equal mtimes too, because bash 3.2 compares whole seconds.
+# Failures are left for `doctor` to report.
+repair_plugin_paths() {
+  local f stale="" stamp="$PDIR/.claude-as-plugins-checked"
+  [ -L "$PDIR/plugins" ] && [ "$PDIR/plugins" -ef "$BASE/plugins" ] || return 0
+  for f in "$BASE/plugins/installed_plugins.json" "$BASE/plugins/known_marketplaces.json"; do
+    if [ -f "$f" ] && ! [ "$stamp" -nt "$f" ]; then stale=1; fi
+  done
+  [ -n "$stale" ] && have_jq || return 0
+  { : > "$stamp"; } 2>/dev/null || return 0
+  plugin_paths "$PDIR" 1 >/dev/null 2>&1 || true
 }
 
 # Warn about credentials that override every profile's own /login (Claude Code

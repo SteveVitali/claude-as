@@ -8,8 +8,11 @@ Semver. The single source of truth is `CLAUDE_AS_VERSION` in `bin/claude-as`.
 
 1. Update `CLAUDE_AS_VERSION` in `bin/claude-as`.
 2. Add a dated section to `CHANGELOG.md`, and its compare link at the bottom.
-3. Verify: `shellcheck -x bin/claude-as install.sh tests/helpers.bash && bats tests/ && TEST_BASH=/bin/bash bats tests/`.
-4. Commit, tag and push, then create the release with the script attached
+3. If Claude Code has had releases since the last check, go through
+   "Claude Code behaviour to re-check" in `CONTRIBUTING.md` and update the
+   version noted there and in the README FAQ.
+4. Verify: `shellcheck -x bin/claude-as install.sh tests/helpers.bash && bats tests/ && TEST_BASH=/bin/bash bats tests/`.
+5. Commit, tag and push, then create the release with the script attached
    (the curl installer downloads `releases/latest/download/claude-as`):
 
    ```bash
@@ -19,13 +22,13 @@ Semver. The single source of truth is `CLAUDE_AS_VERSION` in `bin/claude-as`.
    gh release create vX.Y.Z bin/claude-as --title vX.Y.Z --notes-file /tmp/notes.md
    ```
 
-5. Compute the tarball digest and update `Formula/claude-as.rb` (`url` and `sha256`):
+6. Compute the tarball digest and update `Formula/claude-as.rb` (`url` and `sha256`):
 
    ```bash
    curl -fsSL https://github.com/SteveVitali/claude-as/archive/refs/tags/vX.Y.Z.tar.gz | shasum -a 256
    ```
 
-6. Copy `Formula/claude-as.rb` into `SteveVitali/homebrew-tap` (`Formula/`), commit
+7. Copy `Formula/claude-as.rb` into `SteveVitali/homebrew-tap` (`Formula/`), commit
    and push it, then check:
 
    ```bash

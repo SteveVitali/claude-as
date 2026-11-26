@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] - 2026-11-25
+
+### Changed
+- Launching a profile rewrites plugin paths that its earlier sessions recorded
+  under it, so they point into the shared base (the same files). Removing a
+  profile can no longer break plugins it installed, short of ones from its very
+  last session, which `doctor --fix` still catches. A stamp file in the profile
+  keeps the check to two `stat` calls unless a plugin file has changed since
+  the profile's last launch.
+- README: the "Known upstream issues" section is gone. The one issue you can
+  run into (shared `projects/` prompting) is explained in the FAQ, next to the
+  workaround. The others are handled by claude-as, harmless with it, or fixed
+  in Claude Code, and CONTRIBUTING.md now lists them for maintainers to
+  re-check on new Claude Code releases.
+- README: the steps for removing a profile now point out that its own
+  transcripts go with it unless `projects/` is shared, and how to keep them.
+
 ## [0.3.0] - 2026-11-25
 
 ### Added
@@ -100,6 +117,7 @@ All notable changes to this project are documented here. The format follows
   `claude_bin`, `base_dir`.
 - Works with macOS's bash 3.2 as well as current bash.
 
+[0.3.1]: https://github.com/SteveVitali/claude-as/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/SteveVitali/claude-as/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/SteveVitali/claude-as/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/SteveVitali/claude-as/releases/tag/v0.1.0

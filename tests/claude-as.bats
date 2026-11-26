@@ -816,3 +816,50 @@ b.md" "$TP" "$SID"
   run ca doctor work
   [ "$status" -eq 0 ]
 }
+
+@test "launching a profile rewrites plugin paths its earlier sessions recorded, and only those" {
+  ca setup work >/dev/null 2>&1
+  ca setup lab >/dev/null 2>&1
+  mkdir -p "$HOME/.claude/plugins"
+  jq -n --arg w "$HOME/.claude-work/plugins/cache/m/demo/1.0" --arg l "$HOME/.claude-lab/plugins/cache/m/other/2.0" \
+    '{version: 2, plugins: {"demo@m": [{installPath: $w}], "other@m": [{installPath: $l}]}}' > "$HOME/.claude/plugins/installed_plugins.json"
+  jq -n --arg w "$HOME/.claude-work/plugins/marketplaces/m" '{m: {installLocation: $w}}' > "$HOME/.claude/plugins/known_marketplaces.json"
+  run ca work -p hi
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ARGS=-p hi"* ]] || false
+  [[ "$output" != *"plugins"* ]] || false
+  [ "$(jq -r '.plugins["demo@m"][0].installPath' "$HOME/.claude/plugins/installed_plugins.json")" = "$HOME/.claude/plugins/cache/m/demo/1.0" ]
+  [ "$(jq -r '.plugins["other@m"][0].installPath' "$HOME/.claude/plugins/installed_plugins.json")" = "$HOME/.claude-lab/plugins/cache/m/other/2.0" ]
+  [ "$(jq -r '.m.installLocation' "$HOME/.claude/plugins/known_marketplaces.json")" = "$HOME/.claude/plugins/marketplaces/m" ]
+}
+
+@test "launching leaves plugin paths alone when the profile doesn't share plugins/" {
+  write_config "share_skip = plugins"
+  ca setup work >/dev/null 2>&1
+  [ ! -L "$HOME/.claude-work/plugins" ]
+  mkdir -p "$HOME/.claude/plugins"
+  jq -n --arg w "$HOME/.claude-work/plugins/cache/m/demo/1.0" '{version: 2, plugins: {"demo@m": [{installPath: $w}]}}' \
+    > "$HOME/.claude/plugins/installed_plugins.json"
+  cp "$HOME/.claude/plugins/installed_plugins.json" "$TESTTMP/before.json"
+  run ca work -p hi
+  [ "$status" -eq 0 ]
+  cmp -s "$TESTTMP/before.json" "$HOME/.claude/plugins/installed_plugins.json"
+}
+
+@test "the launch-time plugin check runs again only after a plugin file changes" {
+  ca setup work >/dev/null 2>&1
+  mkdir -p "$HOME/.claude/plugins"
+  f="$HOME/.claude/plugins/installed_plugins.json"
+  jq -n '{version: 2, plugins: {}}' > "$f"
+  ca work -p hi >/dev/null
+  [ -f "$HOME/.claude-work/.claude-as-plugins-checked" ]
+  # Recorded under the profile but older than the last check: left for doctor.
+  jq -n --arg w "$HOME/.claude-work/plugins/cache/m/demo/1.0" '{version: 2, plugins: {"demo@m": [{installPath: $w}]}}' > "$f"
+  touch -t 202001010000 "$f"
+  ca work -p hi >/dev/null
+  [ "$(jq -r '.plugins["demo@m"][0].installPath' "$f")" = "$HOME/.claude-work/plugins/cache/m/demo/1.0" ]
+  # Changed since: rewritten.
+  touch "$f"
+  ca work -p hi >/dev/null
+  [ "$(jq -r '.plugins["demo@m"][0].installPath' "$f")" = "$HOME/.claude/plugins/cache/m/demo/1.0" ]
+}
